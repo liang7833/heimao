@@ -1,0 +1,21 @@
+base_model: Kronos-base
+basemodel_epochs: 40
+basemodel_folder: basemodel
+batch_size: 128
+data_path: h:\kronos交易\training_data\BTCUSDT_5m.csv
+device: GPU (CUDA)
+exp_name: custom_model
+learning_rate: 0.0001
+log_interval: 50
+lookback_window: 256
+num_workers: 0
+predict_window: 48
+save_path: Kronos/finetune_csv/finetuned
+skip_existing: false
+tokenizer_epochs: 50
+tokenizer_folder: tokenizer
+tokenizer_learning_rate: 0.0002
+train_basemodel: true
+train_ratio: 0.9
+train_tokenizer: true
+val_ratio: 0.1

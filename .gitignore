@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+env/
+venv/
+ENV/
+
+# Build and distribution
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+# Configuration files
+.env
+
+# Data files
+*.png
+*.pkl
+*.safetensors
+*.csv
+
+# Project specific
+prediction_results/
+logs/
+balance_data.csv
+config_backups/
+
+# Model cache directories
+models/*/.cache/
+models/*/runs/
+
+# Large model files (too big for GitHub)
+models/kronos-base/
+models/kronos-mini/
+models/kronos-small/
+models/kronos-tokenizer-base/
+models/fingpt-sentiment/
+models/Qwen*/
+models/.lock/
+
+# Cache files
+btc_news_cache.json
+btc_news_cache_summary.json
+news_sentiment_cache.json
+
+# Build files
+黑猫交易系统/
+*.exe
+*.spec
+
+# Training data
+training_data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
