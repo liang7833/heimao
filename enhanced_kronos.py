@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
@@ -62,6 +62,20 @@ KronosPredictor = None
 KRONOS_AVAILABLE = False
 
 
+# 训练用的特征列表（和 Kronos/finetune_csv/config.py 一致）
+CUSTOM_MODEL_FEATURES = [
+    "open", "high", "low", "close", "vol", "amt",  # 基础数据
+    "MA5", "MA10", "MA20",                           # 移动平均线
+    "BIAS20",                                          # 乖离率
+    "ATR14", "AMPLITUDE",                             # 波动性指标
+    "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO",         # 成交量指标
+    "RSI14", "RSI7",                                  # 动量指标
+    "MACD", "MACD_HIST",                              # MACD指标
+    "PRICE_SLOPE5", "PRICE_SLOPE10",                  # 趋势指标
+    "HIGH5", "LOW5", "HIGH10", "LOW10",              # 极值指标
+    "VOL_BREAKOUT", "VOL_SHRINK"                       # 成交量突破
+]
+
 def load_kronos_models(model_name: str):
     try:
         from Kronos.model.kronos import Kronos, KronosTokenizer, KronosPredictor
@@ -71,8 +85,9 @@ def load_kronos_models(model_name: str):
             
             # 尝试多个路径
             possible_paths = [
-                os.path.join(os.path.dirname(__file__), "custom_models", custom_name),
                 os.path.join(os.path.dirname(__file__), "Kronos", "finetune_csv", "Kronos", "finetune_csv", "finetuned", custom_name),
+                os.path.join(os.path.dirname(__file__), "Kronos", "finetune_csv", "finetuned", custom_name),
+                os.path.join(os.path.dirname(__file__), "custom_models", custom_name),
                 custom_name
             ]
             
@@ -92,19 +107,29 @@ def load_kronos_models(model_name: str):
                     tokenizer = KronosTokenizer.from_pretrained(tokenizer_path)
                     print(f"  从本地路径加载 model: {model_path}")
                     model = Kronos.from_pretrained(model_path)
-                    predictor = KronosPredictor(model, tokenizer, max_context=512)
-                    print(f"✓ 自定义模型全部加载成功!")
-                    return tokenizer, model, predictor
+                    predictor = KronosPredictor(model, tokenizer, max_context=512, feature_list=CUSTOM_MODEL_FEATURES)
+                    print(f"✓ 自定义模型全部加载成功! (特征数: {len(CUSTOM_MODEL_FEATURES)})")
+                    return tokenizer, model, predictor, CUSTOM_MODEL_FEATURES
                 else:
                     print(f"  自定义模型子目录不存在: {tokenizer_path} 或 {model_path}")
             else:
                 print(f"  未找到自定义模型: {custom_name}，尝试路径: {possible_paths}")
         
+        # 官方模型使用默认特征列表
+        OFFICIAL_MODEL_FEATURES = ["open", "high", "low", "close", "volume", "amount"]
+        
         models_dir = os.path.join(os.path.dirname(__file__), "models")
         
-        if model_name == "kronos-small":
+        # 支持的官方模型列表
+        official_models = {
+            "kronos-small": "NeoQuasar/Kronos-small",
+            "kronos-base": "NeoQuasar/Kronos-base",
+            "kronos-mini": "NeoQuasar/Kronos-mini"
+        }
+        
+        if model_name in official_models:
             tokenizer_path = os.path.join(models_dir, "kronos-tokenizer-base")
-            model_path = os.path.join(models_dir, "kronos-small")
+            model_path = os.path.join(models_dir, model_name)
             
             if os.path.exists(tokenizer_path) and os.path.exists(model_path):
                 print(f"  尝试从本地目录加载...")
@@ -115,9 +140,9 @@ def load_kronos_models(model_name: str):
                     print(f"  从本地路径加载 model: {model_path}")
                     model = Kronos.from_pretrained(model_path)
                     print(f"  ✓ Model 从本地加载成功 (n_layers={model.n_layers})")
-                    predictor = KronosPredictor(model, tokenizer, max_context=512)
-                    print(f"✓ kronos-small 模型全部加载成功!")
-                    return tokenizer, model, predictor
+                    predictor = KronosPredictor(model, tokenizer, max_context=512, feature_list=OFFICIAL_MODEL_FEATURES)
+                    print(f"✓ {model_name} 模型全部加载成功! (特征数: {len(OFFICIAL_MODEL_FEATURES)})")
+                    return tokenizer, model, predictor, OFFICIAL_MODEL_FEATURES
                 except Exception as e:
                     print(f"  本地加载失败: {e}")
                     import traceback
@@ -126,9 +151,9 @@ def load_kronos_models(model_name: str):
             print(f"  从 HuggingFace Hub 加载...")
             try:
                 tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-                model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
-                predictor = KronosPredictor(model, tokenizer, max_context=512)
-                return tokenizer, model, predictor
+                model = Kronos.from_pretrained(official_models[model_name])
+                predictor = KronosPredictor(model, tokenizer, max_context=512, feature_list=OFFICIAL_MODEL_FEATURES)
+                return tokenizer, model, predictor, OFFICIAL_MODEL_FEATURES
             except Exception as e:
                 print(f"  Hub 加载失败: {e}")
         
@@ -137,147 +162,7 @@ def load_kronos_models(model_name: str):
         import traceback
         traceback.print_exc()
     
-    return None, None, None
-
-
-class TechnicalAnalyzer:
-    def __init__(self):
-        print("使用技术分析作为备选方案")
-        self.use_kronos = False
-
-    def calculate_indicators(self, df):
-        df = df.copy()
-        df["sma_20"] = df["close"].rolling(window=20).mean()
-        df["sma_50"] = df["close"].rolling(window=50).mean()
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df["rsi"] = 100 - (100 / (1 + rs))
-        exp1 = df["close"].ewm(span=12, adjust=False).mean()
-        exp2 = df["close"].ewm(span=26, adjust=False).mean()
-        df["macd"] = exp1 - exp2
-        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-        df["bb_middle"] = df["close"].rolling(window=20).mean()
-        bb_std = df["close"].rolling(window=20).std()
-        df["bb_upper"] = df["bb_middle"] + (bb_std * 2)
-        df["bb_lower"] = df["bb_middle"] - (bb_std * 2)
-        return df
-
-    def analyze(self, df):
-        try:
-            if df is None or len(df) < 20:
-                print(f"技术分析失败：数据不足，需要至少20条数据，当前只有 {len(df) if df is not None else 0} 条")
-                current_price = float(df.iloc[-1]['close']) if df is not None and len(df) > 0 else 0
-                return {
-                    'trend_direction': 'NEUTRAL', 
-                    'trend_strength': 0.0, 
-                    'price_change_pct': 0.0,
-                    'current_price': current_price,
-                    'predicted_price': current_price,
-                    'pred_support': current_price * 0.98,
-                    'pred_resistance': current_price * 1.02,
-                    'pred_low': current_price * 0.98,
-                    'pred_high': current_price * 1.02,
-                    'historical_df': df,
-                    'signal_valid': False, 
-                    'analysis_method': 'Fallback (Insufficient Data)'
-                }
-            
-            df_copy = df.copy()
-            df_copy = df_copy.dropna(subset=['open', 'high', 'low', 'close'])
-            
-            if len(df_copy) < 20:
-                print(f"技术分析失败：清理NaN后数据不足")
-                current_price = float(df_copy.iloc[-1]['close']) if len(df_copy) > 0 else 0
-                return {
-                    'trend_direction': 'NEUTRAL', 
-                    'trend_strength': 0.0, 
-                    'price_change_pct': 0.0,
-                    'current_price': current_price,
-                    'predicted_price': current_price,
-                    'pred_support': current_price * 0.98,
-                    'pred_resistance': current_price * 1.02,
-                    'pred_low': current_price * 0.98,
-                    'pred_high': current_price * 1.02,
-                    'historical_df': df,
-                    'signal_valid': False, 
-                    'analysis_method': 'Fallback (Bad Data)'
-                }
-            
-            df = self.calculate_indicators(df_copy)
-            current_price = df["close"].iloc[-1]
-            sma_20 = df["sma_20"].iloc[-1]
-            sma_50 = df["sma_50"].iloc[-1] if not pd.isna(df["sma_50"].iloc[-1]) else sma_20
-            rsi = df["rsi"].iloc[-1]
-            macd = df["macd"].iloc[-1]
-            macd_signal = df["macd_signal"].iloc[-1]
-
-            long_signals = 0
-            short_signals = 0
-
-            if current_price > sma_20:
-                long_signals += 1
-            else:
-                short_signals += 1
-            if sma_20 > sma_50:
-                long_signals += 1
-            else:
-                short_signals += 1
-            if rsi < 30:
-                long_signals += 1
-            elif rsi > 70:
-                short_signals += 1
-            if macd > macd_signal:
-                long_signals += 1
-            else:
-                short_signals += 1
-
-            recent = df["close"].iloc[-10:]
-            price_change = (recent.iloc[-1] - recent.iloc[0]) / recent.iloc[0]
-
-            if long_signals > short_signals:
-                trend_direction = "LONG"
-                trend_strength = (long_signals / 5) * abs(price_change) * 10
-            else:
-                trend_direction = "SHORT"
-                trend_strength = (short_signals / 5) * abs(price_change) * 10
-
-            volatility = df["close"].std() / df["close"].mean()
-
-            return {
-                "trend_direction": trend_direction,
-                "trend_strength": min(trend_strength, 1.0),
-                "price_change_pct": price_change,
-                "current_price": current_price,
-                "predicted_price": current_price * (1 + price_change * 0.5),
-                "pred_support": current_price * (1 - volatility * 2),
-                "pred_resistance": current_price * (1 + volatility * 2),
-                "pred_low": current_price * (1 - volatility * 2),
-                "pred_high": current_price * (1 + volatility * 2),
-                "historical_df": df,
-                "signal_valid": trend_strength >= StrategyConfig.TREND_STRENGTH_THRESHOLD,
-                "analysis_method": "Technical Analysis",
-            }
-        except Exception as e:
-            print(f"技术分析失败：{e}")
-            import traceback
-            traceback.print_exc()
-            current_price = float(df.iloc[-1]['close']) if df is not None and len(df) > 0 else 0
-            return {
-                'trend_direction': 'NEUTRAL', 
-                'trend_strength': 0.0, 
-                'price_change_pct': 0.0,
-                'current_price': current_price,
-                'predicted_price': current_price,
-                'pred_support': current_price * 0.98,
-                'pred_resistance': current_price * 1.02,
-                'pred_low': current_price * 0.98,
-                'pred_high': current_price * 1.02,
-                'historical_df': df,
-                'signal_valid': False, 
-                'analysis_method': 'Fallback'
-            }
+    return None, None, None, None
 
 
 class AlphaSignalProcessor:
@@ -583,26 +468,27 @@ class AlphaSignalProcessor:
 
 
 class EnhancedKronosAnalyzer:
-    def __init__(self, model_name="kronos-small"):
+    def __init__(self, model_name="custom:custom_model"):
         print("正在加载分析器...")
         self.model_name = model_name
         self.use_kronos = False
         self.tokenizer = None
         self.model = None
         self.predictor = None
+        self.feature_list = None
 
-        self.tech_analyzer = TechnicalAnalyzer()
         self.alpha_processor = AlphaSignalProcessor()
 
-        # 根据model_name动态加载模型
+        # 加载Kronos模型
         try:
             print(f"使用Kronos {model_name}模型...")
-            tokenizer, model, predictor = load_kronos_models(model_name)
+            tokenizer, model, predictor, feature_list = load_kronos_models(model_name)
 
             if tokenizer and model and predictor:
                 self.tokenizer = tokenizer
                 self.model = model
                 self.predictor = predictor
+                self.feature_list = feature_list
                 self.use_kronos = True
                 
                 # 将模型移到 GPU（如果可用）
@@ -618,35 +504,81 @@ class EnhancedKronosAnalyzer:
                 
                 print("✓ Kronos模型就绪!")
             else:
-                print(f"警告: Kronos模型加载返回空值，使用技术分析...")
-                self.use_kronos = False
+                raise RuntimeError(f"Kronos模型加载失败: tokenizer, model, predictor返回空值")
         except Exception as e:
-            print(f"Kronos加载失败: {e}")
+            print(f"❌ Kronos加载失败: {e}")
             import traceback
-
             traceback.print_exc()
+            raise RuntimeError(f"Kronos模型加载失败，交易停止: {e}")
+        
+        print(f"✓ 分析器初始化完成: use_kronos={self.use_kronos}")
 
-        # 确保tech_analyzer始终存在
-        if not hasattr(self, "tech_analyzer") or self.tech_analyzer is None:
-            self.tech_analyzer = TechnicalAnalyzer()
+    def _calculate_slope(self, values):
+        """
+        计算线性回归斜率，用于判断趋势
+        
+        参数:
+            values: 价格数组
+            
+        返回:
+            slope: 斜率值（正数表示上涨，负数表示下跌）
+        """
+        if len(values) < 2:
+            return 0.0
+        
+        try:
+            x = np.arange(len(values))
+            y = np.array(values)
+            
+            # 简单线性回归
+            n = len(x)
+            sum_x = np.sum(x)
+            sum_y = np.sum(y)
+            sum_xy = np.sum(x * y)
+            sum_x2 = np.sum(x * x)
+            
+            denominator = n * sum_x2 - sum_x * sum_x
+            if denominator == 0:
+                return 0.0
+            
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            return slope
+        except Exception:
+            return 0.0
 
     def calculate_kronos_features(self, df):
         """计算Kronos预测所需的技术指标特征"""
         df = df.copy()
 
+        # 处理时间戳列兼容性
+        if "timestamp" in df.columns:
+            df["timestamps"] = df["timestamp"]  # 确保有 timestamps 列名
+        
         # 基础价格数据
         close = df["close"].values
         high = df["high"].values
         low = df["low"].values
         df["open"].values
         
-        # 安全获取amount列，如果不存在则使用volume列
-        if "amount" in df.columns:
+        # 安全获取amount列（训练时用的是 amt 和 vol）
+        if "amt" in df.columns:
+            amount = df["amt"].values
+        elif "amount" in df.columns:
             amount = df["amount"].values
+            df["amt"] = amount  # 添加训练时用的列名
         elif "volume" in df.columns:
             amount = df["volume"].values
+            df["amt"] = amount  # 添加训练时用的列名
         else:
-            amount = np.zeros(len(df))  # 如果都没有，使用零数组
+            amount = np.zeros(len(df))
+            df["amt"] = amount
+        
+        # 添加训练时用的 vol 列
+        if "vol" not in df.columns:
+            if "volume" in df.columns:
+                df["vol"] = df["volume"].values
+            else:
+                df["vol"] = amount
 
         # 1. MA5, MA10, MA20
         df["MA5"] = pd.Series(close).rolling(window=5).mean().values
@@ -723,129 +655,224 @@ class EnhancedKronosAnalyzer:
         df["HIGH10"] = pd.Series(high).rolling(window=10).max().values
         df["LOW10"] = pd.Series(low).rolling(window=10).min().values
 
-        # 12. 放量突破(0/1) - 放量突破5日高点
-        df["VOL_BREAKOUT"] = (
-            ((amount > df["AMOUNT_MA5"] * 1.5) & (close > df["HIGH5"]))
-            .astype(int)
-            .values
-        )
+        # 12. 放量突破(0/1) - 和训练时保持一致（仅成交量条件）
+        df["VOL_BREAKOUT"] = (amount > df["AMOUNT_MA5"] * 1.5).astype(int).values
 
-        # 13. 缩量下跌(0/1) - 缩量跌破5日低点
-        df["VOL_SHRINK"] = (
-            ((amount < df["AMOUNT_MA5"] * 0.5) & (close < df["LOW5"]))
-            .astype(int)
-            .values
-        )
+        # 13. 缩量下跌(0/1) - 和训练时保持一致（仅成交量条件）
+        df["VOL_SHRINK"] = (amount < df["AMOUNT_MA5"] * 0.5).astype(int).values
 
         return df
 
-    def get_enhanced_signal(self, df):
-        # 确保tech_analyzer存在
-        if not hasattr(self, "tech_analyzer") or self.tech_analyzer is None:
-            print("警告: tech_analyzer未初始化，创建新的TechnicalAnalyzer")
-            self.tech_analyzer = TechnicalAnalyzer()
-
-        if self.use_kronos and self.predictor:
-            try:
-                print("使用Kronos AI进行预测...")
-
-                # 计算技术指标特征
-                df_with_features = self.calculate_kronos_features(df)
-
-                # 选择Kronos需要的列（使用完整的技术指标特征集）
-                # 注意：重新训练后的模型将见过所有技术指标
-                kronos_columns = [
-                    "open", "high", "low", "close", "amount",  # 基础价格数据
-                    "MA5", "MA10", "MA20", "BIAS20",            # 移动平均线和乖离率
-                    "ATR14", "AMPLITUDE",                       # 波动性指标
-                    "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO",   # 成交量指标
-                    "RSI14", "RSI7",                            # 动量指标
-                    "MACD", "MACD_HIST",                        # MACD指标
-                    "PRICE_SLOPE5", "PRICE_SLOPE10",            # 趋势指标
-                    "HIGH5", "LOW5", "HIGH10", "LOW10",         # 极值指标
-                    "VOL_BREAKOUT", "VOL_SHRINK"                 # 成交量突破
-                ]
-
-                timestamps = pd.DatetimeIndex(df["timestamps"])
-                y_timestamp = pd.date_range(
-                    start=timestamps[-1] + pd.Timedelta(minutes=5),
-                    periods=StrategyConfig.PREDICTION_LENGTH,
-                    freq="5T",
-                )
-
-                pred_df = self.predictor.predict(
-                    df=df_with_features[kronos_columns],
-                    x_timestamp=timestamps,
-                    y_timestamp=y_timestamp,
-                    pred_len=StrategyConfig.PREDICTION_LENGTH,
-                    T=1.0,
-                    top_p=0.9,
-                    sample_count=1,
-                )
-
-                current_price = df["close"].iloc[-1]
-                pred_prices = pred_df["close"].values
-                price_changes = np.diff(pred_prices)
-                trend_up = np.mean(price_changes) > 0
-                final_pred_price = pred_prices[-1]
-                price_change_pct = (final_pred_price - current_price) / current_price
-                volatility = np.std(pred_prices) / np.mean(pred_prices)
-                trend_strength = abs(price_change_pct) * (1 + volatility * 0.5)
-                pred_low = pred_df["low"].min()
-                pred_high = pred_df["high"].max()
-
-                # 创建原始信号
-                raw_signal = {
-                    "trend_direction": "LONG" if trend_up else "SHORT",
-                    "trend_strength": trend_strength,
-                    "price_change_pct": price_change_pct,
-                    "current_price": current_price,
-                    "predicted_price": final_pred_price,
-                    "pred_support": pred_low * 0.998,
-                    "pred_resistance": pred_high * 1.002,
-                    "pred_low": pred_low,
-                    "pred_high": pred_high,
-                    "prediction_df": pred_df,
-                    "historical_df": df,
-                    "signal_valid": trend_strength
-                    >= StrategyConfig.TREND_STRENGTH_THRESHOLD,
-                    "analysis_method": "Kronos AI",
-                }
-
-                # 使用Alpha处理器转换为标准化Alpha信号
-                alpha_signal = self.alpha_processor.process(raw_signal, df)
-
-                # 打印Alpha信号信息
-                if alpha_signal.get("is_alpha_signal", False):
-                    print(f"Alpha信号生成完成!")
-                    print(f"  Alpha分数: {alpha_signal.get('alpha_score', 0):.3f}")
-                    print(
-                        f"  信号类别: {alpha_signal.get('signal_category', 'UNKNOWN')}"
-                    )
-                    print(
-                        f"  置信度: {alpha_signal.get('confidence_level', 'UNKNOWN')}"
-                    )
-                    print(f"  市场状态: {alpha_signal.get('market_state', 'unknown')}")
-                    print(f"  信号质量: {alpha_signal.get('signal_quality', 0.5):.3f}")
-
-                return alpha_signal
-            except Exception as e:
-                print(f"Kronos预测失败: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-        # 如果Kronos不可用，返回技术分析信号
-        tech_signal = self.tech_analyzer.analyze(df)
-        # 尝试将技术分析信号也转换为Alpha信号
+    def get_enhanced_signal(self, df, analysis_callback=None):
+        if not self.use_kronos or not self.predictor:
+            raise RuntimeError("Kronos模型不可用，无法进行分析")
+        
         try:
-            alpha_tech_signal = self.alpha_processor.process(tech_signal, df)
-            if alpha_tech_signal:
-                return alpha_tech_signal
-        except:
-            pass
+            print("使用Kronos AI进行预测...")
 
-        return tech_signal
+            # 计算技术指标特征（始终计算所有27个指标，用于后续分析）
+            df_with_features = self.calculate_kronos_features(df)
+
+            # 使用模型实际需要的特征列表
+            if self.feature_list is not None:
+                kronos_columns = self.feature_list
+                print(f"  使用模型特征列表: {len(kronos_columns)}个特征")
+            else:
+                # 如果没有特征列表，回退到默认
+                kronos_columns = CUSTOM_MODEL_FEATURES
+                print(f"  回退到默认特征列表: {len(kronos_columns)}个特征")
+            
+            # 去除 NaN 值（移动平均线等指标会产生前几个 NaN）
+            df_with_features = df_with_features.dropna().copy()
+            print(f"  去除 NaN 后数据行数: {len(df_with_features)}")
+
+            # 使用去除 NaN 后的时间戳（兼容不同列名）
+            if "timestamp" in df_with_features.columns:
+                timestamps = pd.DatetimeIndex(df_with_features["timestamp"])
+            elif "timestamps" in df_with_features.columns:
+                timestamps = pd.DatetimeIndex(df_with_features["timestamps"])
+            elif df_with_features.index.name == "timestamp":
+                timestamps = df_with_features.index
+            else:
+                # 使用默认时间戳
+                timestamps = pd.date_range(
+                    start=pd.Timestamp.now() - pd.Timedelta(minutes=len(df_with_features)*5),
+                    periods=len(df_with_features),
+                    freq="5T"
+                )
+            
+            y_timestamp = pd.date_range(
+                start=timestamps[-1] + pd.Timedelta(minutes=5),
+                periods=StrategyConfig.PREDICTION_LENGTH,
+                freq="5T",
+            )
+
+            pred_df = self.predictor.predict(
+                df=df_with_features[kronos_columns],
+                x_timestamp=timestamps,
+                y_timestamp=y_timestamp,
+                pred_len=StrategyConfig.PREDICTION_LENGTH,
+                T=1.0,
+                top_p=0.9,
+                sample_count=1,
+            )
+
+            current_price = df["close"].iloc[-1]
+            pred_prices = pred_df["close"].values
+            
+            # ============================================
+            # Kronos AI 趋势判断（基于 Kronos 的预测价格）
+            # ============================================
+            # 我们已经把所有技术指标传给 Kronos 了
+            # 现在信任 Kronos 基于这些指标的综合判断
+            # ============================================
+            
+            # 1. 看预测的整体变化
+            pred_change = (pred_prices[-1] - pred_prices[0]) / pred_prices[0] if len(pred_prices) > 1 else 0
+            trend_up = pred_change > 0
+            
+            # 2. 趋势强度 = 预测变化的绝对值
+            final_pred_price = pred_prices[-1]
+            price_change_pct = (final_pred_price - current_price) / current_price
+            volatility = np.std(pred_prices) / np.mean(pred_prices)
+            trend_strength = abs(pred_change) * (1 + volatility * 0.2)
+            
+            pred_low = pred_df["low"].min()
+            pred_high = pred_df["high"].max()
+
+            # 打印趋势判断信息
+            print(f"  [Kronos趋势分析]")
+            print(f"    预测整体变化: {'UP' if trend_up else 'DOWN'} (变化: {pred_change*100:+.3f}%)")
+            print(f"    最终方向: {'LONG' if trend_up else 'SHORT'}")
+            print(f"    趋势强度: {trend_strength:.4f} (阈值: {StrategyConfig.TREND_STRENGTH_THRESHOLD})")
+            
+            # 调用回调函数更新图表
+            if analysis_callback is not None:
+                try:
+                    # 准备历史K线和预测K线数据
+                    # 最近30根历史K线
+                    historical_df = df.tail(30).copy()
+                    if "timestamp" in historical_df.columns:
+                        history_timestamps = pd.DatetimeIndex(historical_df["timestamp"])
+                    elif "timestamps" in historical_df.columns:
+                        history_timestamps = pd.DatetimeIndex(historical_df["timestamps"])
+                    elif historical_df.index.name == "timestamp":
+                        history_timestamps = historical_df.index
+                    else:
+                        history_timestamps = pd.date_range(
+                            start=pd.Timestamp.now() - pd.Timedelta(minutes=len(historical_df)*5),
+                            periods=len(historical_df),
+                            freq="5T"
+                        )
+                    history_prices = historical_df["close"].values
+                    
+                    # 预测K线
+                    if "timestamp" in pred_df.columns:
+                        pred_timestamps = pd.DatetimeIndex(pred_df["timestamp"])
+                    else:
+                        pred_timestamps = y_timestamp
+                    pred_prices = pred_df["close"].values
+                    
+                    analysis_callback(
+                        history_timestamps=history_timestamps,
+                        history_prices=history_prices,
+                        pred_timestamps=pred_timestamps,
+                        pred_prices=pred_prices,
+                        trend_direction='LONG' if trend_up else 'SHORT',
+                        trend_strength=trend_strength,
+                        pred_change=pred_change,
+                        threshold=StrategyConfig.TREND_STRENGTH_THRESHOLD
+                    )
+                except Exception as e:
+                    print(f"  [警告] 回调函数执行失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # ============================================
+            # Kronos AI 自主计算止盈止损（基于预测波动率和ATR）
+            # ============================================
+            atr_value = df_with_features["ATR14"].iloc[-1] if "ATR14" in df_with_features.columns else (current_price * 0.008)
+            atr_pct = atr_value / current_price
+            
+            # 基于预测波动率动态计算止盈止损
+            pred_volatility = np.std(pred_prices) / np.mean(pred_prices) if len(pred_prices) > 1 else 0.008
+            
+            # 止损 = 1.5 * ATR 或 0.8% 取较大者（保护本金）
+            sl_pct = max(1.5 * atr_pct, 0.008)
+            
+            # 止盈1 = 1.2 * ATR（保守）
+            tp1_pct = max(1.2 * atr_pct, 0.006)
+            
+            # 止盈2 = 2.5 * ATR（激进）
+            tp2_pct = max(2.5 * atr_pct, 0.015)
+            
+            print(f"  [Kronos止盈止损计算]")
+            print(f"    ATR: {atr_value:.2f} ({atr_pct*100:.2f}%)")
+            print(f"    预测波动率: {pred_volatility*100:.2f}%")
+            print(f"    止损: {sl_pct*100:.2f}%, 止盈1: {tp1_pct*100:.2f}%, 止盈2: {tp2_pct*100:.2f}%")
+            
+            # 计算具体价格
+            if trend_up:
+                ai_stop_loss = current_price * (1 - sl_pct)
+                ai_take_profit_1 = current_price * (1 + tp1_pct)
+                ai_take_profit_2 = current_price * (1 + tp2_pct)
+            else:
+                ai_stop_loss = current_price * (1 + sl_pct)
+                ai_take_profit_1 = current_price * (1 - tp1_pct)
+                ai_take_profit_2 = current_price * (1 - tp2_pct)
+            
+            print(f"    AI推荐止损: ${ai_stop_loss:.2f}")
+            print(f"    AI推荐止盈1: ${ai_take_profit_1:.2f}, 止盈2: ${ai_take_profit_2:.2f}")
+            
+            # 创建原始信号（包含AI自主计算的止盈止损）
+            raw_signal = {
+                "trend_direction": "LONG" if trend_up else "SHORT",
+                "trend_strength": trend_strength,
+                "price_change_pct": price_change_pct,
+                "current_price": current_price,
+                "predicted_price": final_pred_price,
+                "pred_support": pred_low * 0.998,
+                "pred_resistance": pred_high * 1.002,
+                "pred_low": pred_low,
+                "pred_high": pred_high,
+                "prediction_df": pred_df,
+                "historical_df": df,
+                "signal_valid": trend_strength
+                >= StrategyConfig.TREND_STRENGTH_THRESHOLD,
+                "analysis_method": "Kronos AI (信任27个技术指标)",
+                "ai_stop_loss": ai_stop_loss,
+                "ai_take_profit_1": ai_take_profit_1,
+                "ai_take_profit_2": ai_take_profit_2,
+                "atr_value": atr_value,
+                "atr_pct": atr_pct,
+                "pred_volatility": pred_volatility,
+                "sl_pct": sl_pct,
+                "tp1_pct": tp1_pct,
+                "tp2_pct": tp2_pct
+            }
+
+            # 使用Alpha处理器转换为标准化Alpha信号
+            alpha_signal = self.alpha_processor.process(raw_signal, df)
+
+            # 打印Alpha信号信息
+            if alpha_signal.get("is_alpha_signal", False):
+                print(f"Alpha信号生成完成!")
+                print(f"  Alpha分数: {alpha_signal.get('alpha_score', 0):.3f}")
+                print(
+                    f"  信号类别: {alpha_signal.get('signal_category', 'UNKNOWN')}"
+                )
+                print(
+                    f"  置信度: {alpha_signal.get('confidence_level', 'UNKNOWN')}"
+                )
+                print(f"  市场状态: {alpha_signal.get('market_state', 'unknown')}")
+                print(f"  信号质量: {alpha_signal.get('signal_quality', 0.5):.3f}")
+
+            return alpha_signal
+        except Exception as e:
+            print(f"❌ Kronos预测失败: {e}")
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"Kronos预测失败: {e}")
 
     def should_trade(self, signal):
         if not signal.get("signal_valid", False):

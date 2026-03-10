@@ -200,26 +200,25 @@ class TrainingFileManager:
         if save_path and exp_name:
             possible_paths.append(os.path.join(save_path, exp_name))
 
-        # 2. 常见的嵌套路径
+        # 2. 常见的路径（按优先级排序）
         possible_paths.append(
-            os.path.join(
-                "Kronos",
-                "finetune_csv",
-                "Kronos",
-                "finetune_csv",
-                "finetuned",
-                exp_name,
-            )
+            os.path.join("Kronos", "finetune_csv", "Kronos", "finetune_csv", "finetuned", exp_name)
         )
         possible_paths.append(
             os.path.join("Kronos", "finetune_csv", "finetuned", exp_name)
         )
         possible_paths.append(os.path.join("finetuned", exp_name))
 
-        # 3. 搜索整个项目目录
+        # 3. 搜索整个项目目录（作为最后手段）
         for root, dirs, files in os.walk("."):
+            # 跳过一些不必要的目录
+            if "__pycache__" in root or ".git" in root or "backup_" in root:
+                continue
             if exp_name in dirs:
-                possible_paths.append(os.path.join(root, exp_name))
+                path = os.path.join(root, exp_name)
+                # 确保找到的目录包含模型文件
+                if any(os.path.exists(os.path.join(path, f)) for f in ["config.json", "model.safetensors"]):
+                    possible_paths.append(path)
 
         # 检查路径是否存在
         for path in possible_paths:
@@ -326,37 +325,36 @@ class TrainingFileManager:
             if data_path:
                 # 尝试找到数据文件
                 data_file_found = False
+                data_file_name = os.path.basename(data_path)
 
-                # 检查绝对路径
-                if os.path.exists(data_path):
-                    # 如果是绝对路径，转换为相对路径
-                    try:
-                        rel_path = os.path.relpath(data_path, ".")
-                        files_to_pack.append((data_path, rel_path))
-                        self.log_message(f"✓ 添加数据文件: {rel_path}", "SUCCESS")
-                        data_file_found = True
-                    except ValueError:
-                        # 如果不在同一驱动器，使用基本名称
-                        files_to_pack.append((data_path, os.path.basename(data_path)))
-                        self.log_message(
-                            f"✓ 添加数据文件: {os.path.basename(data_path)}", "SUCCESS"
-                        )
-                        data_file_found = True
+                # 可能的目录列表（按优先级）
+                possible_dirs = [
+                    os.path.dirname(data_path) if os.path.isabs(data_path) else "",
+                    "training_data",
+                    "data",
+                    "Kronos/finetune_csv/data",
+                    "."
+                ]
 
-                # 如果没找到，尝试在training_data目录中查找
-                if not data_file_found:
-                    data_file_name = os.path.basename(data_path)
-                    possible_dirs = [
-                        "training_data",
-                        "data",
-                        "Kronos/finetune_csv/data",
-                    ]
+                # 移除空字符串
+                possible_dirs = [d for d in possible_dirs if d]
 
-                    for data_dir in possible_dirs:
-                        test_path = os.path.join(data_dir, data_file_name)
-                        if os.path.exists(test_path):
-                            files_to_pack.append((test_path, test_path))
-                            self.log_message(f"✓ 找到数据文件: {test_path}", "SUCCESS")
+                for data_dir in possible_dirs:
+                    test_path = os.path.join(data_dir, data_file_name)
+                    if os.path.exists(test_path):
+                        # 转换为相对路径
+                        try:
+                            rel_path = os.path.relpath(test_path, ".")
+                            files_to_pack.append((test_path, rel_path))
+                            self.log_message(f"✓ 添加数据文件: {rel_path}", "SUCCESS")
+                            data_file_found = True
+                            break
+                        except ValueError:
+                            # 如果不在同一驱动器，使用基本名称
+                            files_to_pack.append((test_path, os.path.basename(test_path)))
+                            self.log_message(
+                                f"✓ 添加数据文件: {os.path.basename(test_path)}", "SUCCESS"
+                            )
                             data_file_found = True
                             break
 

@@ -91,6 +91,11 @@ class BTCNewsCrawler:
                 "name": "Bitcoin Magazine",
                 "url": "https://bitcoinmagazine.com/.rss/full/",
                 "enabled": True
+            },
+            "binance": {
+                "name": "币安公告",
+                "url": "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
+                "enabled": True
             }
         }
     
@@ -362,6 +367,77 @@ class BTCNewsCrawler:
         
         return news_items
     
+    def _fetch_binance_news(self, source_name: str, url: str) -> List[NewsItem]:
+        """获取币安公告"""
+        news_items = []
+        try:
+            print(f"[新闻爬虫] 正在从 {source_name} 获取最新公告...")
+            
+            # 币安API请求参数
+            params = {
+                "pageNo": 1,
+                "pageSize": 10,
+                "catalogId": 48  # 48是币安公告目录
+            }
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"
+            }
+            
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == "000000" and data.get("data"):
+                articles = data["data"].get("articles", [])
+                count = 0
+                
+                for article in articles:
+                    title = article.get("title", "")
+                    content = article.get("mobileContent", "") or article.get("content", "")
+                    
+                    # 清理HTML标签
+                    soup = BeautifulSoup(content, 'html.parser')
+                    clean_content = soup.get_text(strip=True)
+                    
+                    # 获取发布时间
+                    published_at = ''
+                    if article.get("releaseDate"):
+                        try:
+                            published_ts = article["releaseDate"]
+                            published_dt = datetime.fromtimestamp(published_ts / 1000)
+                            published_at = published_dt.isoformat()
+                        except:
+                            published_at = datetime.now().isoformat()
+                    else:
+                        published_at = datetime.now().isoformat()
+                    
+                    # 构建链接
+                    article_id = article.get("id", "")
+                    article_url = f"https://www.binance.com/zh-CN/support/announcement/{article_id}" if article_id else ""
+                    
+                    news_item = NewsItem(
+                        title=title,
+                        content=clean_content[:200] + '...' if len(clean_content) > 200 else clean_content,
+                        source=source_name,
+                        url=article_url,
+                        published_at=published_at
+                    )
+                    news_items.append(news_item)
+                    count += 1
+                    
+                    # 只取最新3条
+                    if count >= 3:
+                        break
+            
+            print(f"[新闻爬虫] {source_name} 获取到 {len(news_items)} 条公告")
+            
+        except Exception as e:
+            print(f"[新闻爬虫] {source_name} 获取失败: {e}")
+        
+        return news_items
+    
     def fetch_all_news(self, force_refresh: bool = False, analyze_sentiment: bool = True, translate: bool = True) -> List[Dict]:
         """
         获取所有BTC新闻
@@ -388,10 +464,16 @@ class BTCNewsCrawler:
             if not source_config['enabled']:
                 continue
             
-            news = self._parse_rss_feed(
-                source_config['name'],
-                source_config['url']
-            )
+            if source_id == "binance":
+                news = self._fetch_binance_news(
+                    source_config['name'],
+                    source_config['url']
+                )
+            else:
+                news = self._parse_rss_feed(
+                    source_config['name'],
+                    source_config['url']
+                )
             all_news.extend(news)
         
         # 按时间排序（最新的在前）

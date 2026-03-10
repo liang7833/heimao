@@ -51,7 +51,7 @@ class StrategyProfiles:
         "name": "Kronos_震荡套利_5min",
         "description": "依托Kronos预测的高低点，在区间上沿空、下沿多",
         "ai_filter": {
-            "max_trend_strength": 0.020,
+            "max_trend_strength": 0.008,
             "max_support_resistance_distance": 0.040,
             "price_at_extreme_pct": 0.20,
         },
@@ -110,7 +110,7 @@ class StrategyProfiles:
             },
         },
         "special_filters": {
-            "min_volatility_after_news": 0.005,
+            "min_volatility_after_news": 0.001,
             "max_trades_per_day": 5,
         },
     }

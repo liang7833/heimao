@@ -243,11 +243,15 @@ class TimeStrategyAnalyzer:
         range_pct = stats["range"] / stats["total"]
         breakout_pct = stats["breakout"] / stats["total"]
 
+        # 只比较三个策略类型，排除total键
+        strategy_keys = ["trend", "range", "breakout"]
+        recommended = max(strategy_keys, key=lambda k: stats[k])
+        
         return {
             "trend": trend_pct,
             "range": range_pct,
             "breakout": breakout_pct,
-            "recommended": max(stats, key=stats.get),
+            "recommended": recommended,
             "sample_size": stats["total"],
         }
 
@@ -263,11 +267,15 @@ class TimeStrategyAnalyzer:
         range_pct = stats["range"] / stats["total"]
         breakout_pct = stats["breakout"] / stats["total"]
 
+        # 只比较三个策略类型，排除total键
+        strategy_keys = ["trend", "range", "breakout"]
+        recommended = max(strategy_keys, key=lambda k: stats[k])
+        
         return {
             "trend": trend_pct,
             "range": range_pct,
             "breakout": breakout_pct,
-            "recommended": max(stats, key=stats.get),
+            "recommended": recommended,
             "sample_size": stats["total"],
         }
 

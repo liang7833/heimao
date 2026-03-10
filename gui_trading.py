@@ -7,12 +7,14 @@ import sys
 import io
 import logging
 from datetime import datetime
+from typing import Dict, List, Optional, Callable, Any
 import psutil
 import yaml
 import json
 import pynvml
 import matplotlib
 import pandas as pd
+import numpy as np
 
 # 配置日志 - 兼容 PyInstaller 打包环境（无终端模式）
 log_file = None
@@ -98,7 +100,7 @@ except ImportError as e:
 # 配置matplotlib中文字体（最可靠的方法）
 try:
     plt.rcParams["font.sans-serif"] = [
-        "Microsoft YaHei",
+        "微软雅黑",
         "SimHei",
         "SimSun",
         "KaiTi",
@@ -134,9 +136,9 @@ except ImportError:
 except Exception as e:
     print(f"加载HF_TOKEN时出错: {e}")
 
-LARGE_FONT = ("Microsoft YaHei", 12)
-BOLD_FONT = ("Microsoft YaHei", 12, "bold")
-TITLE_FONT = ("Microsoft YaHei", 14, "bold")
+LARGE_FONT = ("微软雅黑", 12)
+BOLD_FONT = ("微软雅黑", 12, "bold")
+TITLE_FONT = ("微软雅黑", 14, "bold")
 
 
 class OutputRedirector:
@@ -343,12 +345,450 @@ class OutputRedirector:
                     self.queue.put(("log", line))
 
 
+class StrategyConfigDialog:
+    """策略参数配置对话框"""
+    
+    def __init__(self, parent, current_config=None):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("⚙️ 策略参数配置")
+        self.dialog.geometry("1200x800")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        self.result = None
+        self.current_config = current_config if current_config else self._get_default_config()
+        
+        # 创建主框架
+        self._create_main_frame()
+        self._load_config_to_ui()
+    
+    def _get_default_config(self):
+        """获取默认配置"""
+        return {
+            "coordinator": {
+                "min_signal_strength": 0.15,
+                "max_position_size": 0.1,
+                "sentiment_weight": 0.3,
+                "technical_weight": 0.7,
+                "black_swan_threshold": "HIGH",
+                "enable_adaptive_filtering": True
+            },
+            "basic": {
+                "LEVERAGE": 10,
+                "TREND_STRENGTH_THRESHOLD": 0.0047,
+                "LOOKBACK_PERIOD": 91,
+                "PREDICTION_LENGTH": 90,
+                "CHECK_INTERVAL": 180
+            },
+            "entry": {
+                "max_kline_change": 0.015,
+                "max_funding_rate_long": 0.03,
+                "min_funding_rate_short": -0.03,
+                "support_buffer": 1.001,
+                "resistance_buffer": 0.999
+            },
+            "stop_loss": {
+                "long_buffer": 0.996,
+                "short_buffer": 1.004
+            },
+            "take_profit": {
+                "tp1_multiplier_long": 1.025,
+                "tp2_multiplier_long": 1.05,
+                "tp3_multiplier_long": 1.14,
+                "tp1_multiplier_short": 0.975,
+                "tp2_multiplier_short": 0.95,
+                "tp3_multiplier_short": 0.86,
+                "tp1_position_ratio": 0.35,
+                "tp2_position_ratio": 0.35,
+                "tp3_position_ratio": 0.30
+            },
+            "risk": {
+                "single_trade_risk": 0.029,
+                "daily_loss_limit": 0.12,
+                "max_consecutive_losses": 6,
+                "max_single_position": 0.29,
+                "max_daily_position": 0.85
+            },
+            "frequency": {
+                "max_daily_trades": 55,
+                "min_trade_interval_minutes": 3,
+                "active_hours_start": 0,
+                "active_hours_end": 24
+            },
+            "position": {
+                "initial_entry_ratio": 0.35,
+                "confirm_interval_kline": 2,
+                "add_on_profit": True,
+                "add_ratio": 0.25,
+                "max_add_times": 3
+            },
+            "strategy": {
+                "entry_confirm_count": 3,
+                "reverse_confirm_count": 2,
+                "require_consecutive_prediction": 2,
+                "post_entry_hours": 6,
+                "take_profit_min_pct": 0.5
+            }
+        }
+    
+    def _create_main_frame(self):
+        """创建主框架"""
+        main_frame = ttk.Frame(self.dialog, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 顶部按钮栏
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 预设选择
+        ttk.Label(button_frame, text="📋 交易风格预设:").pack(side=tk.LEFT, padx=(0, 5))
+        self.preset_var = tk.StringVar(value="平衡型")
+        preset_combo = ttk.Combobox(
+            button_frame, 
+            textvariable=self.preset_var,
+            values=["激进超短线", "平衡型", "稳健短线"],
+            state="readonly",
+            width=15
+        )
+        preset_combo.pack(side=tk.LEFT, padx=(0, 10))
+        preset_combo.bind("<<ComboboxSelected>>", self._on_preset_changed)
+        
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="📁 载入配置", command=self._load_config).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="💾 保存配置", command=self._save_config).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="↩️ 重置默认", command=self._reset_default).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="✅ 应用", command=self._apply_config, style="Accent.TButton").pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="❌ 取消", command=self._cancel).pack(side=tk.RIGHT, padx=(0, 5))
+        
+        # 创建Notebook
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # 创建各个标签页
+        self.config_vars = {}
+        self._create_coordinator_tab()
+        self._create_basic_tab()
+        self._create_entry_tab()
+        self._create_stop_loss_tab()
+        self._create_take_profit_tab()
+        self._create_risk_tab()
+        self._create_frequency_tab()
+        self._create_position_tab()
+    
+    def _create_param_row(self, parent, category, param_name, display_name, param_type, min_val=None, max_val=None, description=""):
+        """创建参数行"""
+        row_frame = ttk.Frame(parent)
+        row_frame.pack(fill=tk.X, pady=2)
+        
+        # 参数名称
+        name_label = ttk.Label(row_frame, text=display_name, width=25, anchor=tk.W)
+        name_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # 输入控件
+        var_key = f"{category}.{param_name}"
+        
+        if param_type == "float":
+            var = tk.DoubleVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        elif param_type == "int":
+            var = tk.IntVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        elif param_type == "bool":
+            var = tk.BooleanVar()
+            entry = ttk.Checkbutton(row_frame, variable=var)
+        elif param_type == "select":
+            var = tk.StringVar()
+            entry = ttk.Combobox(row_frame, textvariable=var, values=["LOW", "MEDIUM", "HIGH"], state="readonly", width=10)
+        else:
+            var = tk.StringVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        
+        entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.config_vars[var_key] = var
+        
+        # 取值范围
+        if min_val is not None and max_val is not None:
+            range_label = ttk.Label(row_frame, text=f"[{min_val}-{max_val}]", width=15, foreground="#7f8c8d")
+            range_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # 说明
+        desc_label = ttk.Label(row_frame, text=description, foreground="#7f8c8d", wraplength=500)
+        desc_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    
+    def _create_coordinator_tab(self):
+        """创建协调器参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="1. 协调器参数")
+        
+        ttk.Label(frame, text="【协调器参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "coordinator", "min_signal_strength", "最小信号强度", "float", 0.0, 1.0, "只有信号强度超过此值才触发交易")
+        self._create_param_row(frame, "coordinator", "max_position_size", "最大仓位比例", "float", 0.0, 1.0, "单次交易的最大仓位比例")
+        self._create_param_row(frame, "coordinator", "sentiment_weight", "舆情信号权重", "float", 0.0, 1.0, "FinGPT舆情分析的权重")
+        self._create_param_row(frame, "coordinator", "technical_weight", "技术信号权重", "float", 0.0, 1.0, "Kronos技术分析的权重")
+        self._create_param_row(frame, "coordinator", "black_swan_threshold", "黑天鹅阈值", "select", None, None, "极端行情敏感度阈值")
+        self._create_param_row(frame, "coordinator", "enable_adaptive_filtering", "自适应过滤", "bool", None, None, "启用动态参数调整")
+    
+    def _create_basic_tab(self):
+        """创建基础参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="2. 基础参数")
+        
+        ttk.Label(frame, text="【基础参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "basic", "LEVERAGE", "杠杆倍数", "int", 1, 125, "交易使用的杠杆大小")
+        self._create_param_row(frame, "basic", "TREND_STRENGTH_THRESHOLD", "趋势强度阈值", "float", 0.001, 0.05, "判断趋势有效的阈值")
+        self._create_param_row(frame, "basic", "LOOKBACK_PERIOD", "回看K线数量", "int", 64, 2048, "技术分析使用的历史数据长度")
+        self._create_param_row(frame, "basic", "PREDICTION_LENGTH", "预测K线数量", "int", 4, 200, "Kronos预测的未来K线数量")
+        self._create_param_row(frame, "basic", "CHECK_INTERVAL", "检查间隔(秒)", "int", 30, 3600, "系统检查交易信号的间隔")
+    
+    def _create_entry_tab(self):
+        """创建入场过滤参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="3. 入场过滤")
+        
+        ttk.Label(frame, text="【入场过滤参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "entry", "max_kline_change", "最大单K变化", "float", 0.001, 0.05, "限制单根K线的最大涨跌幅")
+        self._create_param_row(frame, "entry", "max_funding_rate_long", "多头最大资金费率", "float", -0.05, 0.05, "开多仓时资金费率上限")
+        self._create_param_row(frame, "entry", "min_funding_rate_short", "空头最小资金费率", "float", -0.05, 0.05, "开空仓时资金费率下限")
+        self._create_param_row(frame, "entry", "support_buffer", "支撑位缓冲", "float", 1.000, 1.010, "在支撑位上方多少比例入场")
+        self._create_param_row(frame, "entry", "resistance_buffer", "阻力位缓冲", "float", 0.990, 1.000, "在阻力位下方多少比例入场")
+    
+    def _create_stop_loss_tab(self):
+        """创建止损参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="4. 止损参数")
+        
+        ttk.Label(frame, text="【止损参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "stop_loss", "long_buffer", "多头止损缓冲", "float", 0.900, 0.999, "多头止损相对于入场价的比例")
+        self._create_param_row(frame, "stop_loss", "short_buffer", "空头止损缓冲", "float", 1.001, 1.100, "空头止损相对于入场价的比例")
+    
+    def _create_take_profit_tab(self):
+        """创建止盈参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="5. 止盈参数")
+        
+        ttk.Label(frame, text="【止盈参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "take_profit", "tp1_multiplier_long", "多头第一止盈", "float", 1.001, 1.100, "多头第一止盈目标")
+        self._create_param_row(frame, "take_profit", "tp2_multiplier_long", "多头第二止盈", "float", 1.001, 1.200, "多头第二止盈目标")
+        self._create_param_row(frame, "take_profit", "tp3_multiplier_long", "多头第三止盈", "float", 1.001, 1.300, "多头第三止盈目标")
+        self._create_param_row(frame, "take_profit", "tp1_multiplier_short", "空头第一止盈", "float", 0.900, 0.999, "空头第一止盈目标")
+        self._create_param_row(frame, "take_profit", "tp2_multiplier_short", "空头第二止盈", "float", 0.800, 0.999, "空头第二止盈目标")
+        self._create_param_row(frame, "take_profit", "tp3_multiplier_short", "空头第三止盈", "float", 0.700, 0.999, "空头第三止盈目标")
+        self._create_param_row(frame, "take_profit", "tp1_position_ratio", "第一止盈仓位", "float", 0.1, 1.0, "达到第一止盈时平掉的仓位比例")
+        self._create_param_row(frame, "take_profit", "tp2_position_ratio", "第二止盈仓位", "float", 0.1, 1.0, "达到第二止盈时平掉的仓位比例")
+        self._create_param_row(frame, "take_profit", "tp3_position_ratio", "第三止盈仓位", "float", 0.1, 1.0, "达到第三止盈时平掉的仓位比例")
+    
+    def _create_risk_tab(self):
+        """创建风险管理参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="6. 风险管理")
+        
+        ttk.Label(frame, text="【风险管理参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "risk", "single_trade_risk", "单笔风险比例", "float", 0.001, 0.10, "单笔交易最大亏损比例")
+        self._create_param_row(frame, "risk", "daily_loss_limit", "每日亏损限制", "float", 0.01, 0.20, "单日累计亏损达到此值停止交易")
+        self._create_param_row(frame, "risk", "max_consecutive_losses", "最大连续亏损", "int", 1, 10, "连续亏损次数达到此值暂停交易")
+        self._create_param_row(frame, "risk", "max_single_position", "最大单笔仓位", "float", 0.01, 1.0, "单笔交易的最大仓位比例")
+        self._create_param_row(frame, "risk", "max_daily_position", "最大日仓位", "float", 0.01, 1.0, "单日累计开仓的最大仓位比例")
+    
+    def _create_frequency_tab(self):
+        """创建交易频率参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="7. 交易频率")
+        
+        ttk.Label(frame, text="【交易频率参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "frequency", "max_daily_trades", "每日最大交易", "int", 1, 100, "限制单日最多交易多少次")
+        self._create_param_row(frame, "frequency", "min_trade_interval_minutes", "最小间隔(分)", "int", 1, 60, "两次交易之间的最小间隔")
+        self._create_param_row(frame, "frequency", "active_hours_start", "活跃开始时间", "int", 0, 23, "只在此时间之后进行交易")
+        self._create_param_row(frame, "frequency", "active_hours_end", "活跃结束时间", "int", 1, 24, "只在此时间之前进行交易")
+    
+    def _create_position_tab(self):
+        """创建仓位管理参数标签页"""
+        frame = ttk.Frame(self.notebook, padding="15")
+        self.notebook.add(frame, text="8. 仓位管理")
+        
+        ttk.Label(frame, text="【仓位管理参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_param_row(frame, "position", "initial_entry_ratio", "初始入场比例", "float", 0.1, 1.0, "首次开仓时使用目标仓位的比例")
+        self._create_param_row(frame, "position", "confirm_interval_kline", "确认K线数量", "int", 1, 10, "初始入场后等待多少根K线确认趋势")
+        self._create_param_row(frame, "position", "add_on_profit", "盈利加仓", "int", 0, 1, "是否在盈利时加仓(0=否,1=是)")
+        self._create_param_row(frame, "position", "add_ratio", "加仓比例", "float", 0.1, 0.5, "每次加仓占目标仓位的比例")
+        self._create_param_row(frame, "position", "max_add_times", "最大加仓次数", "int", 1, 10, "最多可以加仓多少次")
+    
+    def _load_config_to_ui(self):
+        """将配置加载到UI"""
+        for category, params in self.current_config.items():
+            for param_name, value in params.items():
+                var_key = f"{category}.{param_name}"
+                if var_key in self.config_vars:
+                    self.config_vars[var_key].set(value)
+    
+    def _get_config_from_ui(self):
+        """从UI获取配置"""
+        config = {}
+        for category in ["coordinator", "basic", "entry", "stop_loss", "take_profit", "risk", "frequency", "position"]:
+            config[category] = {}
+        
+        for var_key, var in self.config_vars.items():
+            category, param_name = var_key.split(".", 1)
+            config[category][param_name] = var.get()
+        
+        return config
+    
+    def _load_config(self):
+        """载入配置文件"""
+        file_path = filedialog.askopenfilename(
+            title="载入配置",
+            filetypes=[("YAML文件", "*.yaml"), ("YAML文件", "*.yml"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.current_config = yaml.safe_load(f)
+                self._load_config_to_ui()
+                messagebox.showinfo("成功", "配置已载入！")
+            except Exception as e:
+                messagebox.showerror("错误", f"载入配置失败: {e}")
+    
+    def _save_config(self):
+        """保存配置文件"""
+        config = self._get_config_from_ui()
+        file_path = filedialog.asksaveasfilename(
+            title="保存配置",
+            defaultextension=".yaml",
+            filetypes=[("YAML文件", "*.yaml"), ("YAML文件", "*.yml"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                messagebox.showinfo("成功", "配置已保存！")
+            except Exception as e:
+                messagebox.showerror("错误", f"保存配置失败: {e}")
+    
+    def _reset_default(self):
+        """重置为默认配置"""
+        if messagebox.askyesno("确认", "确定要重置为默认配置吗？"):
+            self.current_config = self._get_default_config()
+            self._load_config_to_ui()
+    
+    def _apply_config(self):
+        """应用配置"""
+        self.result = self._get_config_from_ui()
+        self.dialog.destroy()
+    
+    def _get_preset_config(self, preset_name):
+        """获取预设配置"""
+        presets = {
+            "激进超短线": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 64,
+                    "PREDICTION_LENGTH": 10
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 5,
+                    "max_daily_trades": 30
+                },
+                "position": {
+                    "confirm_interval_kline": 1
+                }
+            },
+            "平衡型": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 96,
+                    "PREDICTION_LENGTH": 24
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 10,
+                    "max_daily_trades": 20
+                },
+                "position": {
+                    "confirm_interval_kline": 3
+                }
+            },
+            "稳健短线": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 192,
+                    "PREDICTION_LENGTH": 30
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 20,
+                    "max_daily_trades": 10
+                },
+                "position": {
+                    "confirm_interval_kline": 5
+                }
+            }
+        }
+        return presets.get(preset_name, presets["平衡型"])
+    
+    def _apply_preset(self, preset_name):
+        """应用预设配置"""
+        preset_config = self._get_preset_config(preset_name)
+        
+        # 更新配置字典
+        for category, params in preset_config.items():
+            if category in self.current_config:
+                self.current_config[category].update(params)
+        
+        # 更新UI
+        self._load_config_to_ui()
+        print(f"已应用预设: {preset_name}")
+    
+    def _on_preset_changed(self, event):
+        """预设选择改变时触发"""
+        preset_name = self.preset_var.get()
+        self._apply_preset(preset_name)
+    
+    def _cancel(self):
+        """取消"""
+        self.result = None
+        self.dialog.destroy()
+    
+    def show(self):
+        """显示对话框并返回结果"""
+        self.dialog.wait_window()
+        return self.result
+
+
 class KronosTradingGUI:
+    def _center_window(self):
+        """将窗口居中显示"""
+        self.root.update_idletasks()
+        
+        # 获取窗口宽度和高度
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        
+        # 获取屏幕宽度和高度
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        # 计算窗口位置
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        
+        # 设置窗口位置
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # 对齐完成后显示窗口
+        self.root.deiconify()
+    
     def __init__(self, root):
         self.root = root
-        self.root.title("黑猫交易系统v1.0")
-        self.root.geometry("1650x1300")
+        self.root.title("黑猫交易系统v2.0")
+        self.root.geometry("1650x1160")
         self.root.configure(bg="#f0f0f0")
+        
+        # 窗口居中显示
+        self._center_window()
         
         # 设置应用图标
         try:
@@ -378,6 +818,10 @@ class KronosTradingGUI:
         self.queue = queue.Queue()
         self.output_redirector = OutputRedirector(self.queue, self.set_progress)
         
+        # 亏损触发AI优化相关变量
+        self.optimization_baseline_balance = 0.0  # 优化基准资金
+        self.loss_check_timer = None  # 亏损检查定时器
+        
         # 交易间隔计时器变量
         self.interval_seconds = 120  # 默认间隔
         self.remaining_seconds = 0   # 剩余秒数
@@ -391,6 +835,7 @@ class KronosTradingGUI:
         self.kronos_model = None
         self.kronos_tokenizer = None
         self.kronos_predictor = None
+        self.kronos_model_name = "custom:custom_model"  # 默认模型
 
         # 多智能体量化交易系统属性
         self.fingpt_analyzer = None
@@ -444,10 +889,24 @@ class KronosTradingGUI:
         self.qwen_status_var = tk.StringVar(value="未初始化")
         self.qwen_strategy_type_var = tk.StringVar(value="自动选择")
         self.qwen_risk_var = tk.StringVar(value="平衡型")
+        self.qwen_trade_frequency_var = tk.StringVar(value="中频")
+        
+        # 交易统计变量
+        self.today_trades_var = tk.StringVar(value="0")
+        self.today_profit_var = tk.StringVar(value="$0.00")
+        self.week_trades_var = tk.StringVar(value="0")
+        self.week_profit_var = tk.StringVar(value="$0.00")
+        self.month_trades_var = tk.StringVar(value="0")
+        self.month_profit_var = tk.StringVar(value="$0.00")
         
         # 策略确认次数变量
         self.entry_confirm_count_var = tk.StringVar(value="2")
         self.reverse_confirm_count_var = tk.StringVar(value="2")
+        self.require_consecutive_prediction_var = tk.StringVar(value="3")
+        
+        # 开仓后计时参数
+        self.post_entry_hours_var = tk.StringVar(value="2")
+        self.take_profit_min_pct_var = tk.StringVar(value="0.6")
         
         # 初始化Qwen3优化器
         self.qwen_optimizer = None
@@ -475,6 +934,18 @@ class KronosTradingGUI:
         self.root.after(100, self.process_queue)
         # 启动新闻自动刷新（30秒后开始，每2分钟刷新）
         self.root.after(30000, self._start_news_auto_refresh)
+        # 自动刷新IP地址（界面加载后500ms）
+        self.root.after(500, self.refresh_ip_address)
+        
+        # 创建信号文件，通知启动器主程序已准备好
+        try:
+            import os
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            signal_file = os.path.join(base_dir, "_splash_close.txt")
+            with open(signal_file, 'w') as f:
+                f.write("ready")
+        except Exception as e:
+            print(f"创建信号文件失败: {e}")
 
     def _init_log_files(self):
         """初始化日志文件"""
@@ -511,6 +982,15 @@ class KronosTradingGUI:
         self.visualize_logger.addHandler(
             logging.FileHandler(visualize_log, encoding="utf-8")
         )
+
+        # 回测日志
+        backtest_log = os.path.join(
+            log_dir, f"backtest_{datetime.now().strftime('%Y%m%d')}.log"
+        )
+        self.backtest_logger = logging.getLogger("backtest")
+        self.backtest_logger.setLevel(logging.INFO)
+        self.backtest_logger.handlers = []
+        self.backtest_logger.addHandler(logging.FileHandler(backtest_log, encoding="utf-8"))
 
     def _load_balance_data(self):
         """加载历史资金数据"""
@@ -600,7 +1080,8 @@ class KronosTradingGUI:
             try:
                 print("  正在初始化FinGPT舆情分析器...")
                 self.fingpt_analyzer = FinGPTSentimentAnalyzer(
-                    use_local_model=True
+                    use_local_model=True,
+                    use_qwen_preprocessing=True
                 )
                 print("  ✓ FinGPT舆情分析器初始化完成")
             except Exception as e:
@@ -615,11 +1096,17 @@ class KronosTradingGUI:
             try:
                 print("  正在初始化策略协调器...")
                 self.strategy_coordinator = StrategyCoordinator(
-                    kronos_model_name="kronos-small",
+                    kronos_model_name="custom:custom_model",
                     use_fingpt=(self.fingpt_analyzer is not None),
                     symbol="BTC"
                 )
                 print("  ✓ 策略协调器初始化完成")
+                
+                # 应用等待的参数（如果有）
+                if hasattr(self, "_pending_coordinator_params") and self._pending_coordinator_params:
+                    print("  应用之前优化的协调器参数...")
+                    self.strategy_coordinator.update_config(self._pending_coordinator_params)
+                    print("  ✓ 协调器参数已应用")
             except Exception as e:
                 print(f"  ✗ 策略协调器初始化失败: {e}")
                 self.strategy_coordinator = None
@@ -663,9 +1150,16 @@ class KronosTradingGUI:
     def refresh_model_list(self):
         """刷新模型列表"""
         model_list = ["kronos-small", "kronos-mini", "kronos-base"]
+        seen_models = set(model_list)
 
         # 扫描训练好的模型目录
         possible_dirs = [
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "Kronos",
+                "finetune_csv",
+                "finetuned",
+            ),
             os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
                 "Kronos",
@@ -713,7 +1207,10 @@ class KronosTradingGUI:
                             os.path.exists(tokenizer_path_alt)
                             and os.path.exists(basemodel_path_alt)
                         ):
-                            model_list.append(f"custom:{exp_name}")
+                            model_name = f"custom:{exp_name}"
+                            if model_name not in seen_models:
+                                model_list.append(model_name)
+                                seen_models.add(model_name)
             except Exception as e:
                 print(f"扫描训练模型失败: {e}")
 
@@ -726,7 +1223,10 @@ class KronosTradingGUI:
                 for model_name in os.listdir(custom_model_dir):
                     model_path = os.path.join(custom_model_dir, model_name)
                     if os.path.isdir(model_path):
-                        model_list.append(f"custom:{model_name}")
+                        full_model_name = f"custom:{model_name}"
+                        if full_model_name not in seen_models:
+                            model_list.append(full_model_name)
+                            seen_models.add(full_model_name)
             except Exception as e:
                 print(f"扫描自定义模型失败: {e}")
 
@@ -762,12 +1262,44 @@ class KronosTradingGUI:
                  background=[('active', '#2980b9')],
                  relief=[('pressed', 'sunken')])
 
+    def refresh_ip_address(self):
+        """刷新获取当前IP地址"""
+        try:
+            self.ip_address_var.set("获取中...")
+            import socket
+            import requests
+            
+            # 方法1: 使用socket获取本地IP
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+            except:
+                local_ip = "127.0.0.1"
+            
+            # 方法2: 使用API获取公网IP（可选）
+            public_ip = "获取中..."
+            try:
+                response = requests.get("https://api.ipify.org?format=json", timeout=3)
+                if response.status_code == 200:
+                    data = response.json()
+                    public_ip = data.get("ip", "未知")
+            except:
+                public_ip = "获取失败"
+            
+            # 显示本地IP和公网IP
+            self.ip_address_var.set(f"本地:{local_ip} | 公网:{public_ip}")
+        except Exception as e:
+            self.ip_address_var.set(f"获取失败: {str(e)}")
+
     def create_widgets(self):
         main_container = ttk.Frame(self.root, style="TFrame")
         main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left_frame = ttk.Frame(main_container, style="TFrame")
+        left_frame = ttk.Frame(main_container, style="TFrame", width=360)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 10))
+        left_frame.pack_propagate(False)
 
         right_frame = ttk.Frame(main_container, style="TFrame")
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -1033,13 +1565,20 @@ class KronosTradingGUI:
         api_frame = ttk.LabelFrame(parent, text="API 配置", style="TFrame", padding=10)
         api_frame.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(api_frame, text="币安 API Key:").pack(anchor=tk.W)
-        self.api_key_entry = ttk.Entry(api_frame, width=40)
-        self.api_key_entry.pack(fill=tk.X, pady=(0, 5))
+        api_grid = ttk.Frame(api_frame)
+        api_grid.pack(fill=tk.X, pady=(0, 5))
 
-        ttk.Label(api_frame, text="币安 Secret Key:").pack(anchor=tk.W)
-        self.secret_key_entry = ttk.Entry(api_frame, width=40)
-        self.secret_key_entry.pack(fill=tk.X, pady=(0, 5))
+        api_col1 = ttk.Frame(api_grid)
+        api_col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(api_col1, text="币安 API Key:").pack(anchor=tk.W)
+        self.api_key_entry = ttk.Entry(api_col1, width=20)
+        self.api_key_entry.pack(fill=tk.X, pady=(0, 0))
+
+        api_col2 = ttk.Frame(api_grid)
+        api_col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(api_col2, text="币安 Secret Key:").pack(anchor=tk.W)
+        self.secret_key_entry = ttk.Entry(api_col2, width=20)
+        self.secret_key_entry.pack(fill=tk.X, pady=(0, 0))
 
         self.show_api_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -1055,15 +1594,33 @@ class KronosTradingGUI:
         )
         config_frame.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(config_frame, text="交易对:").pack(anchor=tk.W)
+        # 交易对 - 第一行
+        pair_frame = ttk.Frame(config_frame)
+        pair_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(pair_frame, text="交易对:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
         self.symbol_var = tk.StringVar(value="BTCUSDT")
-        symbol_label = ttk.Label(config_frame, text="BTCUSDT", font=("TkDefaultFont", 10, "bold"))
-        symbol_label.pack(anchor=tk.W, pady=(0, 5))
+        ttk.Label(pair_frame, text="BTCUSDT", font=("微软雅黑", 10, "bold")).pack(side=tk.LEFT)
+        
+        # IP地址 - 第二行
+        ip_frame = ttk.Frame(config_frame)
+        ip_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(ip_frame, text="IP地址:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.ip_address_var = tk.StringVar(value="获取中...")
+        self.ip_address_label = ttk.Label(ip_frame, textvariable=self.ip_address_var, font=("微软雅黑", 10))
+        self.ip_address_label.pack(side=tk.LEFT)
+        # 添加获取IP地址按钮
+        ttk.Button(ip_frame, text="刷新", command=self.refresh_ip_address).pack(side=tk.LEFT, padx=(10, 0))
 
-        ttk.Label(config_frame, text="交易策略:").pack(anchor=tk.W)
+        # 交易策略和Kronos模型 - 一行两列
+        strategy_model_grid = ttk.Frame(config_frame)
+        strategy_model_grid.pack(fill=tk.X, pady=(0, 5))
+
+        strategy_col = ttk.Frame(strategy_model_grid)
+        strategy_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(strategy_col, text="交易策略:").pack(anchor=tk.W)
         self.strategy_var = tk.StringVar(value="自动策略")
         strategy_combo = ttk.Combobox(
-            config_frame, textvariable=self.strategy_var, state="readonly", width=37
+            strategy_col, textvariable=self.strategy_var, state="readonly", width=15
         )
         strategy_combo["values"] = (
             "趋势爆发",
@@ -1072,114 +1629,163 @@ class KronosTradingGUI:
             "自动策略",
             "时间策略",
         )
-        strategy_combo.pack(fill=tk.X, pady=(0, 5))
+        strategy_combo.pack(fill=tk.X, pady=(0, 0))
         strategy_combo.bind("<<ComboboxSelected>>", self.on_strategy_changed)
 
-        ttk.Label(config_frame, text="Kronos模型:").pack(anchor=tk.W)
-        self.model_var = tk.StringVar(value="kronos-small")
+        model_col = ttk.Frame(strategy_model_grid)
+        model_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(model_col, text="Kronos模型:").pack(anchor=tk.W)
+        self.model_var = tk.StringVar(value="custom:custom_model")
         self.model_combo = ttk.Combobox(
-            config_frame, textvariable=self.model_var, state="readonly", width=37
+            model_col, textvariable=self.model_var, state="readonly", width=15
         )
         self.refresh_model_list()
-        self.model_combo.pack(fill=tk.X, pady=(0, 5))
+        self.model_combo.pack(fill=tk.X, pady=(0, 0))
+        
+        # 模型切换时重置Kronos predictor
+        def on_model_change(*args):
+            self.kronos_predictor = None
+            self.kronos_model = None
+            self.kronos_tokenizer = None
+            self.kronos_model_name = self.model_var.get()
+        
+        self.model_var.trace_add("write", on_model_change)
 
         # 刷新模型按钮
         refresh_model_frame = ttk.Frame(config_frame)
-        refresh_model_frame.pack(fill=tk.X, pady=(0, 5))
+        refresh_model_frame.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(
             refresh_model_frame, text="刷新模型列表", command=self.refresh_model_list
         ).pack(side=tk.RIGHT)
 
-        ttk.Label(config_frame, text="分析周期:").pack(anchor=tk.W)
+        # 参数 - 5行两列，共10个参数
+        params_grid = ttk.Frame(config_frame)
+        params_grid.pack(fill=tk.X, pady=(0, 0))
+
+        # 行1: 分析周期 + 杠杆倍数
+        row1 = ttk.Frame(params_grid)
+        row1.pack(fill=tk.X, pady=(0, 4))
+        col1 = ttk.Frame(row1)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(col1, text="分析周期:").pack(anchor=tk.W)
         self.timeframe_var = tk.StringVar(value="5m")
         timeframe_combo = ttk.Combobox(
-            config_frame, textvariable=self.timeframe_var, state="readonly", width=37
+            col1, textvariable=self.timeframe_var, state="readonly", width=15
         )
         timeframe_combo["values"] = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d")
-        timeframe_combo.pack(fill=tk.X, pady=(0, 5))
+        timeframe_combo.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="杠杆倍数:").pack(anchor=tk.W)
+        col2 = ttk.Frame(row1)
+        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(col2, text="杠杆倍数:").pack(anchor=tk.W)
         self.leverage_var = tk.StringVar(value="10")
         leverage_combo = ttk.Combobox(
-            config_frame, textvariable=self.leverage_var, state="readonly", width=37
+            col2, textvariable=self.leverage_var, state="readonly", width=15
         )
-        leverage_combo["values"] = (
-            "1",
-            "2",
-            "3",
-            "5",
-            "10",
-            "20",
-            "25",
-            "50",
-            "75",
-            "100",
-        )
-        leverage_combo.pack(fill=tk.X, pady=(0, 5))
+        leverage_combo["values"] = ("1", "2", "3", "5", "10", "20", "25", "50", "75", "100")
+        leverage_combo.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="最小仓位 (USDT):").pack(anchor=tk.W)
+        # 行2: 最小仓位 + 交易间隔
+        row2 = ttk.Frame(params_grid)
+        row2.pack(fill=tk.X, pady=(0, 4))
+        col1 = ttk.Frame(row2)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(col1, text="最小仓位 (USDT):").pack(anchor=tk.W)
         self.min_position_var = tk.StringVar(value="100")
         min_pos_entry = ttk.Entry(
-            config_frame, textvariable=self.min_position_var, width=40
+            col1, textvariable=self.min_position_var, width=18
         )
-        min_pos_entry.pack(fill=tk.X, pady=(0, 5))
+        min_pos_entry.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="交易间隔 (秒):").pack(anchor=tk.W)
+        col2 = ttk.Frame(row2)
+        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(col2, text="交易间隔 (秒):").pack(anchor=tk.W)
         self.interval_var = tk.StringVar(value="120")
         interval_combo = ttk.Combobox(
-            config_frame, textvariable=self.interval_var, state="readonly", width=37
+            col2, textvariable=self.interval_var, state="readonly", width=15
         )
         interval_combo["values"] = ("30", "60", "120", "180", "300", "600")
-        interval_combo.pack(fill=tk.X, pady=(0, 5))
+        interval_combo.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="趋势阈值:").pack(anchor=tk.W)
+        # 行3: 趋势阈值 + AI最小趋势强度
+        row3 = ttk.Frame(params_grid)
+        row3.pack(fill=tk.X, pady=(0, 4))
+        col1 = ttk.Frame(row3)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(col1, text="趋势阈值:").pack(anchor=tk.W)
         self.threshold_var = tk.StringVar(value="0.008")
         threshold_entry = ttk.Entry(
-            config_frame, textvariable=self.threshold_var, width=40
+            col1, textvariable=self.threshold_var, width=18
         )
-        threshold_entry.pack(fill=tk.X, pady=(0, 5))
+        threshold_entry.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="AI最小趋势强度:").pack(anchor=tk.W)
+        col2 = ttk.Frame(row3)
+        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(col2, text="AI最小趋势强度:").pack(anchor=tk.W)
         self.ai_min_trend_var = tk.StringVar(value="0.010")
         ai_min_trend_entry = ttk.Entry(
-            config_frame, textvariable=self.ai_min_trend_var, width=40
+            col2, textvariable=self.ai_min_trend_var, width=18
         )
-        ai_min_trend_entry.pack(fill=tk.X, pady=(0, 5))
+        ai_min_trend_entry.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="AI最小预测偏离度:").pack(anchor=tk.W)
+        # 行4: AI最小预测偏离度 + 最大资金费率
+        row4 = ttk.Frame(params_grid)
+        row4.pack(fill=tk.X, pady=(0, 4))
+        col1 = ttk.Frame(row4)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(col1, text="AI最小预测偏离度:").pack(anchor=tk.W)
         self.ai_min_deviation_var = tk.StringVar(value="0.008")
         ai_min_deviation_entry = ttk.Entry(
-            config_frame, textvariable=self.ai_min_deviation_var, width=40
+            col1, textvariable=self.ai_min_deviation_var, width=18
         )
-        ai_min_deviation_entry.pack(fill=tk.X, pady=(0, 5))
+        ai_min_deviation_entry.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="最大资金费率 (%):").pack(anchor=tk.W)
+        col2 = ttk.Frame(row4)
+        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(col2, text="最大资金费率 (%):").pack(anchor=tk.W)
         self.max_funding_var = tk.StringVar(value="1.0")
         max_funding_entry = ttk.Entry(
-            config_frame, textvariable=self.max_funding_var, width=40
+            col2, textvariable=self.max_funding_var, width=18
         )
-        max_funding_entry.pack(fill=tk.X, pady=(0, 5))
+        max_funding_entry.pack(fill=tk.X, pady=(0, 0))
 
-        ttk.Label(config_frame, text="最小资金费率 (%):").pack(anchor=tk.W)
+        # 行5: 最小资金费率 + 亏损触发优化
+        row5 = ttk.Frame(params_grid)
+        row5.pack(fill=tk.X, pady=(0, 0))
+        col1 = ttk.Frame(row5)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        ttk.Label(col1, text="最小资金费率 (%):").pack(anchor=tk.W)
         self.min_funding_var = tk.StringVar(value="-1.0")
         min_funding_entry = ttk.Entry(
-            config_frame, textvariable=self.min_funding_var, width=40
+            col1, textvariable=self.min_funding_var, width=18
         )
-        min_funding_entry.pack(fill=tk.X)
+        min_funding_entry.pack(fill=tk.X, pady=(0, 0))
+
+        col2 = ttk.Frame(row5)
+        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        ttk.Label(col2, text="亏损触发优化 (%):").pack(anchor=tk.W)
+        self.loss_trigger_var = tk.StringVar(value="10.0")
+        loss_trigger_entry = ttk.Entry(
+            col2, textvariable=self.loss_trigger_var, width=18
+        )
+        loss_trigger_entry.pack(fill=tk.X, pady=(0, 0))
 
     def create_control_section(self, parent):
         control_frame = ttk.Frame(parent, style="TFrame", padding=10)
         control_frame.pack(fill=tk.X, pady=(0, 10))
 
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 5))
+
         self.start_button = ttk.Button(
-            control_frame, text="启动交易", command=self.start_trading
+            button_frame, text="启动交易", command=self.start_trading
         )
-        self.start_button.pack(fill=tk.X, pady=(0, 5))
+        self.start_button.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
 
         self.stop_button = ttk.Button(
-            control_frame, text="停止交易", command=self.stop_trading, state=tk.DISABLED
+            button_frame, text="停止交易", command=self.stop_trading, state=tk.DISABLED
         )
-        self.stop_button.pack(fill=tk.X)
+        self.stop_button.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(2, 0))
 
         # 资金信息显示
         fund_frame = ttk.LabelFrame(control_frame, text="合约资金", padding=8)
@@ -1237,50 +1843,93 @@ class KronosTradingGUI:
         # 程序启动后立即开始记录资金数据
         self.root.after(1000, self._start_balance_recording)
 
+        # Kronos预测可视化图表
+        prediction_chart_frame = ttk.LabelFrame(control_frame, text="📊 Kronos预测走势", padding=8)
+        prediction_chart_frame.pack(fill=tk.X, pady=(10, 0))
+
+        # 导入matplotlib
+        try:
+            import matplotlib
+            matplotlib.use('TkAgg')
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            
+            # 存储Kronos分析结果的变量
+            self.kronos_analysis_data = {
+                'trend_direction': None,
+                'trend_strength': 0,
+                'pred_change': 0,
+                'threshold': 0.008,
+                'timestamp': None
+            }
+            
+            # 创建图表
+            self.prediction_fig = plt.Figure(figsize=(5.5, 3.0), dpi=100)
+            self.prediction_ax = self.prediction_fig.add_subplot(111)
+            
+            # 设置中文字体
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+            plt.rcParams['axes.unicode_minus'] = False
+            
+            # 初始绘制空白图表
+            self._draw_prediction_chart()
+            
+            # 嵌入到Tkinter
+            self.prediction_canvas = FigureCanvasTkAgg(self.prediction_fig, master=prediction_chart_frame)
+            self.prediction_canvas.draw()
+            self.prediction_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+        except ImportError as e:
+            ttk.Label(prediction_chart_frame, text=f"图表库未安装: {e}", foreground="red").pack()
+            self.prediction_fig = None
+            self.prediction_ax = None
+            self.prediction_canvas = None
+            self.kronos_analysis_data = None
+
     def create_terminal_section(self, parent):
         # 创建笔记本控件（标签页）
         notebook = ttk.Notebook(parent)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 日志标签页
+        # 交易日志标签页
         log_frame = ttk.Frame(notebook)
-        notebook.add(log_frame, text="日志")
+        notebook.add(log_frame, text="交易日志")
         self._create_log_tab(log_frame)
 
-        # 可视化标签页
-        viz_frame = ttk.Frame(notebook)
-        notebook.add(viz_frame, text="可视化")
-        self._create_visualization_tab(viz_frame)
+        # AI实盘策略标签页（合并AI策略中心 + 实盘监控）
+        ai_trading_frame = ttk.Frame(notebook)
+        notebook.add(ai_trading_frame, text="AI实盘策略")
+        self._create_ai_trading_tab(ai_trading_frame)
+        
+        # 策略回测标签页
+        backtest_frame = ttk.Frame(notebook)
+        notebook.add(backtest_frame, text="策略回测")
+        self._create_main_backtest_tab(backtest_frame)
+        
+        # BTC新闻标签页
+        news_frame = ttk.Frame(notebook)
+        notebook.add(news_frame, text="BTC新闻")
+        self._create_news_tab(news_frame)
 
-        # 训练标签页
+        # 可视化预测标签页
+        viz_frame = ttk.Frame(notebook)
+        notebook.add(viz_frame, text="可视化预测")
+        self._create_visualization_tab(viz_frame)
+        
+        # 资金曲线标签页
+        balance_chart_frame = ttk.Frame(notebook)
+        notebook.add(balance_chart_frame, text="资金曲线")
+        self._create_balance_chart_tab(balance_chart_frame)
+
+        # 训练Kronos模型标签页
         train_frame = ttk.Frame(notebook)
-        notebook.add(train_frame, text="训练")
+        notebook.add(train_frame, text="训练Kronos模型")
         self._create_training_tab(train_frame)
 
         # 训练文件管理标签页
         training_manager_frame = ttk.Frame(notebook)
         notebook.add(training_manager_frame, text="训练文件管理")
         self._create_training_manager_tab(training_manager_frame)
-
-        # AI策略中心标签页
-        ai_strategy_frame = ttk.Frame(notebook)
-        notebook.add(ai_strategy_frame, text="AI策略中心")
-        self._create_ai_strategy_tab(ai_strategy_frame)
-
-        # 实盘监控标签页
-        live_monitor_frame = ttk.Frame(notebook)
-        notebook.add(live_monitor_frame, text="实盘监控")
-        self._create_live_monitor_tab(live_monitor_frame)
-        
-        # 资金曲线标签页
-        balance_chart_frame = ttk.Frame(notebook)
-        notebook.add(balance_chart_frame, text="资金曲线")
-        self._create_balance_chart_tab(balance_chart_frame)
-        
-        # BTC新闻标签页
-        news_frame = ttk.Frame(notebook)
-        notebook.add(news_frame, text="BTC新闻")
-        self._create_news_tab(news_frame)
         
         # 帮助标签页
         help_frame = ttk.Frame(notebook)
@@ -1571,9 +2220,41 @@ class KronosTradingGUI:
                 
                 self.log("Kronos模型加载完成")
 
+            # 定义Kronos的特征列表
+            # 官方模型(kronos-*)用6个基础特征，自定义模型用27个特征
+            OFFICIAL_MODEL_FEATURES = [
+                "open", "high", "low", "close", "vol", "amt"
+            ]
+            CUSTOM_MODEL_FEATURES = [
+                "open", "high", "low", "close", "vol", "amt",  # 基础数据
+                "MA5", "MA10", "MA20",                           # 移动平均线
+                "BIAS20",                                          # 乖离率
+                "ATR14", "AMPLITUDE",                             # 波动性指标
+                "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO",         # 成交量指标
+                "RSI14", "RSI7",                                  # 动量指标
+                "MACD", "MACD_HIST",                              # MACD指标
+                "PRICE_SLOPE5", "PRICE_SLOPE10",                  # 趋势指标
+                "HIGH5", "LOW5", "HIGH10", "LOW10",              # 极值指标
+                "VOL_BREAKOUT", "VOL_SHRINK"                       # 成交量突破
+            ]
+            
+            # 根据模型类型选择特征列表
+            # 直接从model_var获取当前选择的模型，确保第一次加载就正确
+            model_name = self.model_var.get()
+            if model_name.startswith("kronos-"):
+                # 官方模型
+                FEATURE_LIST = OFFICIAL_MODEL_FEATURES
+            else:
+                # 自定义模型
+                FEATURE_LIST = CUSTOM_MODEL_FEATURES
+            
+            # 更新kronos_model_name，确保下次切换时正确
+            self.kronos_model_name = model_name
+
             if self.kronos_predictor is None:
                 self.kronos_predictor = KronosPredictor(
-                    self.kronos_model, self.kronos_tokenizer, max_context=512
+                    self.kronos_model, self.kronos_tokenizer, max_context=512,
+                    feature_list=FEATURE_LIST
                 )
 
             predictor = self.kronos_predictor
@@ -1582,13 +2263,29 @@ class KronosTradingGUI:
             self.viz_status_label.config(text="正在生成预测...")
             self.viz_canvas.get_tk_widget().update()
 
-            # 准备数据 - Kronos模型需要open, high, low, close, volume, amount列
-            x_df = df.iloc[:lookback][["open", "high", "low", "close", "volume"]].copy()
-            # 添加amount列（成交额），如果没有则用成交量*平均价格估算
-            if "amount" not in x_df.columns:
-                x_df["amount"] = x_df["volume"] * x_df[
-                    ["open", "high", "low", "close"]
-                ].mean(axis=1)
+            # 准备数据 - Kronos模型需要正确的列名
+            x_df = df.iloc[:lookback].copy()
+            
+            # 确保有必要的列（兼容不同列名）
+            # 处理volume/vol列
+            if "volume" in x_df.columns and "vol" not in x_df.columns:
+                x_df["vol"] = x_df["volume"]
+            elif "vol" in x_df.columns and "volume" not in x_df.columns:
+                x_df["volume"] = x_df["vol"]
+            elif "vol" not in x_df.columns and "volume" not in x_df.columns:
+                # 如果都没有，创建默认值
+                x_df["vol"] = x_df["close"] * 100
+                x_df["volume"] = x_df["vol"]
+            
+            # 处理amount/amt列
+            if "amount" in x_df.columns and "amt" not in x_df.columns:
+                x_df["amt"] = x_df["amount"]
+            elif "amt" in x_df.columns and "amount" not in x_df.columns:
+                x_df["amount"] = x_df["amt"]
+            elif "amt" not in x_df.columns and "amount" not in x_df.columns:
+                # 如果都没有，用成交量*平均价格估算
+                x_df["amt"] = x_df["vol"] * x_df[["open", "high", "low", "close"]].mean(axis=1)
+                x_df["amount"] = x_df["amt"]
 
             # 转换时间戳为DatetimeIndex（Kronos模型要求）
             x_timestamp = pd.DatetimeIndex(df.iloc[:lookback]["timestamp"])
@@ -1661,37 +2358,10 @@ class KronosTradingGUI:
             )
 
             # 生成预测前先计算技术指标特征
-            x_df_with_features = self._calculate_kronos_features(x_df)
+            x_df_with_features = self._calculate_kronos_features(x_df, FEATURE_LIST)
 
-            # 选择Kronos需要的列（原始价格 + 技术指标）
-            kronos_columns = [
-                "open",
-                "high",
-                "low",
-                "close",
-                "amount",
-                "MA5",
-                "MA10",
-                "MA20",
-                "BIAS20",
-                "ATR14",
-                "AMPLITUDE",
-                "AMOUNT_MA5",
-                "AMOUNT_MA10",
-                "VOL_RATIO",
-                "RSI14",
-                "RSI7",
-                "MACD",
-                "MACD_HIST",
-                "PRICE_SLOPE5",
-                "PRICE_SLOPE10",
-                "HIGH5",
-                "LOW5",
-                "HIGH10",
-                "LOW10",
-                "VOL_BREAKOUT",
-                "VOL_SHRINK",
-            ]
+            # 选择Kronos需要的列
+            kronos_columns = FEATURE_LIST
 
             # 生成预测
             pred_df = predictor.predict(
@@ -1734,7 +2404,7 @@ class KronosTradingGUI:
                     history_prices,
                     label="历史价格",
                     color="blue",
-                    linewidth=1.5,
+                    linewidth=1.5
                 )
                 ax1.plot(
                     pred_timestamps,
@@ -1742,7 +2412,7 @@ class KronosTradingGUI:
                     label="预测未来",
                     color="red",
                     linewidth=1.5,
-                    linestyle="--",
+                    linestyle="--"
                 )
                 ax1.set_ylabel("收盘价 (USDT)", fontsize=12)
                 ax1.legend(loc="upper left", fontsize=10)
@@ -1772,7 +2442,7 @@ class KronosTradingGUI:
                     history_prices,
                     label="实际价格",
                     color="blue",
-                    linewidth=1.5,
+                    linewidth=1.5
                 )
                 ax1.plot(
                     pred_timestamps,
@@ -1780,7 +2450,7 @@ class KronosTradingGUI:
                     label="预测价格",
                     color="red",
                     linewidth=1.5,
-                    linestyle="--",
+                    linestyle="--"
                 )
                 ax1.set_ylabel("收盘价 (USDT)", fontsize=12)
                 ax1.legend(loc="upper left", fontsize=10)
@@ -1841,6 +2511,9 @@ class KronosTradingGUI:
                 self.viz_status_label.config(
                     text=f"[预测未来] 可视化完成！预测长度: {pred_len}周期"
                 )
+                # 更新左侧小图表
+                self._update_small_prediction_chart(history_timestamps, history_prices, 
+                                                    pred_timestamps, pred_prices, symbol, timeframe)
             else:
                 self.viz_status_label.config(
                     text=f"[回测过去] 可视化完成！预测长度: {pred_len}周期"
@@ -1855,6 +2528,117 @@ class KronosTradingGUI:
             traceback.print_exc()
             # 将错误信息输出到日志
             self.log(f"可视化生成错误: {str(e)}")
+
+    def _draw_prediction_chart(self):
+        """绘制Kronos预测K线走势图表"""
+        try:
+            if self.prediction_ax is None:
+                return
+
+            # 清空图表
+            self.prediction_ax.clear()
+
+            data = self.kronos_analysis_data
+
+            if data.get('history_prices') is None or len(data.get('history_prices', [])) == 0:
+                # 没有分析数据时显示等待状态
+                self.prediction_ax.text(0.5, 0.5, '等待Kronos分析...', 
+                                        ha='center', va='center', 
+                                        fontsize=14, color='gray', 
+                                        transform=self.prediction_ax.transAxes)
+                self.prediction_ax.set_title('Kronos预测走势', fontsize=11, fontweight='bold')
+                self.prediction_ax.axis('off')
+            else:
+                # 有分析数据，绘制历史和预测价格
+                self.prediction_ax.set_facecolor('#f8f9fa')
+                
+                history_timestamps = data.get('history_timestamps', [])
+                history_prices = data.get('history_prices', [])
+                pred_timestamps = data.get('pred_timestamps', [])
+                pred_prices = data.get('pred_prices', [])
+                trend_direction = data.get('trend_direction', 'NEUTRAL')
+                
+                # 绘制历史价格
+                self.prediction_ax.plot(history_timestamps, history_prices, 
+                                        label='历史', color='#3498db', linewidth=1.0)
+                
+                # 绘制预测价格
+                self.prediction_ax.plot(pred_timestamps, pred_prices, 
+                                        label='预测', color='#e74c3c', linewidth=1.0)
+                
+                # 设置标题和标签
+                direction_text = '↑ 上涨' if trend_direction == 'LONG' else '↓ 下跌'
+                self.prediction_ax.set_title(f'Kronos预测走势 ({direction_text})', fontsize=11, fontweight='bold')
+                
+                # 隐藏X/Y轴的数字和标签
+                self.prediction_ax.set_xticks([])
+                self.prediction_ax.set_yticks([])
+                
+                # 隐藏所有边框
+                self.prediction_ax.spines['top'].set_visible(False)
+                self.prediction_ax.spines['right'].set_visible(False)
+                self.prediction_ax.spines['left'].set_visible(False)
+                self.prediction_ax.spines['bottom'].set_visible(False)
+                
+                # 只显示网格
+                self.prediction_ax.grid(True, alpha=0.3)
+                
+            # 更新画布（使用更大的tight_layout来最大化图表显示面积）
+            self.prediction_fig.tight_layout(pad=1.0)
+            if hasattr(self, 'prediction_canvas') and self.prediction_canvas:
+                self.prediction_canvas.draw()
+
+        except Exception as e:
+            print(f"绘制预测图表失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_kronos_analysis(self, history_timestamps=None, history_prices=None, 
+                               pred_timestamps=None, pred_prices=None,
+                               trend_direction='NEUTRAL', trend_strength=0, 
+                               pred_change=0, threshold=0.008):
+        """更新Kronos分析数据并刷新图表
+        
+        Args:
+            history_timestamps: 历史时间戳数组
+            history_prices: 历史价格数组
+            pred_timestamps: 预测时间戳数组
+            pred_prices: 预测价格数组
+            trend_direction: 'LONG' 或 'SHORT'
+            trend_strength: 趋势强度值
+            pred_change: 预测变化值 (小数)
+            threshold: 阈值
+        """
+        try:
+            if not hasattr(self, 'kronos_analysis_data') or self.kronos_analysis_data is None:
+                return
+
+            from datetime import datetime
+            
+            self.kronos_analysis_data = {
+                'history_timestamps': history_timestamps,
+                'history_prices': history_prices,
+                'pred_timestamps': pred_timestamps,
+                'pred_prices': pred_prices,
+                'trend_direction': trend_direction,
+                'trend_strength': trend_strength,
+                'pred_change': pred_change,
+                'threshold': threshold,
+                'timestamp': datetime.now()
+            }
+            
+            # 刷新图表
+            self._draw_prediction_chart()
+            
+        except Exception as e:
+            print(f"更新Kronos分析数据失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _update_small_prediction_chart(self, history_timestamps, history_prices, 
+                                       pred_timestamps, pred_prices, symbol, timeframe):
+        """更新左侧的Kronos预测小图表（保留旧方法兼容性）"""
+        pass
 
     def _get_timeframe_freq(self, timeframe):
         """将时间周期字符串转换为pandas频率字符串"""
@@ -1877,105 +2661,127 @@ class KronosTradingGUI:
         else:
             return "5T"  # 默认5分钟
 
-    def _calculate_kronos_features(self, df):
-        """计算Kronos预测所需的技术指标特征"""
+    def _calculate_kronos_features(self, df, feature_list):
+        """计算Kronos预测所需的特征 - 根据feature_list决定计算哪些"""
         import numpy as np
-
+        
         df = df.copy()
 
         close = df["close"].values
         high = df["high"].values
         low = df["low"].values
         
+        # 处理成交量列 - 兼容volume/vol
+        if "volume" in df.columns and "vol" not in df.columns:
+            df["vol"] = df["volume"]
+        elif "vol" in df.columns and "volume" not in df.columns:
+            df["volume"] = df["vol"]
+        elif "vol" not in df.columns and "volume" not in df.columns:
+            df["vol"] = close * 100
+            df["volume"] = df["vol"]
+        
         # 处理成交额列 - 兼容不同数据源
-        # Binance API返回 'amount' 列 (quote_asset_volume)，但有些数据源可能没有
         if "amount" in df.columns:
             amount = df["amount"].values
+        elif "amt" in df.columns:
+            amount = df["amt"].values
         elif "volume" in df.columns:
-            # 使用成交量作为替代
             amount = df["volume"].values
         elif "quote_asset_volume" in df.columns:
-            # 使用原始列名
             amount = df["quote_asset_volume"].values
         else:
-            # 如果没有成交额列，创建一个默认值（价格乘以某个系数）
-            amount = close * 100  # 默认假设每根K线成交额 = 价格 * 100
+            amount = close * 100
+        
+        # 确保amt列存在
+        if "amt" not in df.columns:
+            df["amt"] = amount
+        if "amount" not in df.columns:
+            df["amount"] = amount
+        
+        # 检查是否需要计算技术指标
+        needs_tech_indicators = any(
+            col in feature_list 
+            for col in ["MA5", "MA10", "MA20", "BIAS20", "ATR14", "AMPLITUDE", 
+                       "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO", "RSI14", "RSI7", 
+                       "MACD", "MACD_HIST", "PRICE_SLOPE5", "PRICE_SLOPE10", 
+                       "HIGH5", "LOW5", "HIGH10", "LOW10", "VOL_BREAKOUT", "VOL_SHRINK"]
+        )
+        
+        if needs_tech_indicators:
+            df["MA5"] = pd.Series(close).rolling(window=5).mean().values
+            df["MA10"] = pd.Series(close).rolling(window=10).mean().values
+            df["MA20"] = pd.Series(close).rolling(window=20).mean().values
 
-        df["MA5"] = pd.Series(close).rolling(window=5).mean().values
-        df["MA10"] = pd.Series(close).rolling(window=10).mean().values
-        df["MA20"] = pd.Series(close).rolling(window=20).mean().values
+            df["BIAS20"] = (close / df["MA20"] - 1) * 100
 
-        df["BIAS20"] = (close / df["MA20"] - 1) * 100
+            tr1 = high - low
+            tr2 = np.abs(high - np.roll(close, 1))
+            tr3 = np.abs(low - np.roll(close, 1))
+            tr = np.maximum(tr1, np.maximum(tr2, tr3))
+            tr[0] = 0
+            df["ATR14"] = pd.Series(tr).rolling(window=14).mean().values
 
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = 0
-        df["ATR14"] = pd.Series(tr).rolling(window=14).mean().values
+            df["AMPLITUDE"] = (high - low) / close * 100
 
-        df["AMPLITUDE"] = (high - low) / close * 100
+            df["AMOUNT_MA5"] = pd.Series(amount).rolling(window=5).mean().values
+            df["AMOUNT_MA10"] = pd.Series(amount).rolling(window=10).mean().values
 
-        df["AMOUNT_MA5"] = pd.Series(amount).rolling(window=5).mean().values
-        df["AMOUNT_MA10"] = pd.Series(amount).rolling(window=10).mean().values
+            df["VOL_RATIO"] = amount / df["AMOUNT_MA5"]
 
-        df["VOL_RATIO"] = amount / df["AMOUNT_MA5"]
+            delta = pd.Series(close).diff()
+            gain = delta.where(delta > 0, 0)
+            loss = (-delta).where(delta < 0, 0)
 
-        delta = pd.Series(close).diff()
-        gain = delta.where(delta > 0, 0)
-        loss = (-delta).where(delta < 0, 0)
+            avg_gain14 = gain.rolling(window=14).mean()
+            avg_loss14 = loss.rolling(window=14).mean()
+            rs14 = avg_gain14 / avg_loss14
+            df["RSI14"] = (100 - (100 / (1 + rs14))).values
 
-        avg_gain14 = gain.rolling(window=14).mean()
-        avg_loss14 = loss.rolling(window=14).mean()
-        rs14 = avg_gain14 / avg_loss14
-        df["RSI14"] = (100 - (100 / (1 + rs14))).values
+            avg_gain7 = gain.rolling(window=7).mean()
+            avg_loss7 = loss.rolling(window=7).mean()
+            rs7 = avg_gain7 / avg_loss7
+            df["RSI7"] = (100 - (100 / (1 + rs7))).values
 
-        avg_gain7 = gain.rolling(window=7).mean()
-        avg_loss7 = loss.rolling(window=7).mean()
-        rs7 = avg_gain7 / avg_loss7
-        df["RSI7"] = (100 - (100 / (1 + rs7))).values
+            ema12 = pd.Series(close).ewm(span=12, adjust=False).mean()
+            ema26 = pd.Series(close).ewm(span=26, adjust=False).mean()
+            df["MACD"] = ema12 - ema26
+            df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
+            df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
 
-        ema12 = pd.Series(close).ewm(span=12, adjust=False).mean()
-        ema26 = pd.Series(close).ewm(span=26, adjust=False).mean()
-        df["MACD"] = ema12 - ema26
-        df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
-        df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
-
-        df["PRICE_SLOPE5"] = (
-            pd.Series(close)
-            .rolling(window=5)
-            .apply(
-                lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
-                raw=True,
+            df["PRICE_SLOPE5"] = (
+                pd.Series(close)
+                .rolling(window=5)
+                .apply(
+                    lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                    raw=True,
+                )
+                .values
             )
-            .values
-        )
-        df["PRICE_SLOPE10"] = (
-            pd.Series(close)
-            .rolling(window=10)
-            .apply(
-                lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
-                raw=True,
+            df["PRICE_SLOPE10"] = (
+                pd.Series(close)
+                .rolling(window=10)
+                .apply(
+                    lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                    raw=True,
+                )
+                .values
             )
-            .values
-        )
 
-        df["HIGH5"] = pd.Series(high).rolling(window=5).max().values
-        df["LOW5"] = pd.Series(low).rolling(window=5).min().values
-        df["HIGH10"] = pd.Series(high).rolling(window=10).max().values
-        df["LOW10"] = pd.Series(low).rolling(window=10).min().values
+            df["HIGH5"] = pd.Series(high).rolling(window=5).max().values
+            df["LOW5"] = pd.Series(low).rolling(window=5).min().values
+            df["HIGH10"] = pd.Series(high).rolling(window=10).max().values
+            df["LOW10"] = pd.Series(low).rolling(window=10).min().values
 
-        df["VOL_BREAKOUT"] = (
-            ((amount > df["AMOUNT_MA5"] * 1.5) & (close > df["HIGH5"]))
-            .astype(int)
-            .values
-        )
-        df["VOL_SHRINK"] = (
-            ((amount < df["AMOUNT_MA5"] * 0.5) & (close < df["LOW5"]))
-            .astype(int)
-            .values
-        )
-
+            df["VOL_BREAKOUT"] = (
+                amount > df["AMOUNT_MA5"] * 1.5
+            ).astype(int).values
+            df["VOL_SHRINK"] = (
+                amount < df["AMOUNT_MA5"] * 0.5
+            ).astype(int).values
+        
+        # 清理 NaN 值
+        df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        
         return df
 
     def load_settings(self):
@@ -2298,7 +3104,10 @@ class KronosTradingGUI:
                 if msg_type == "log":
                     # 显示在终端中
                     self.terminal.insert(tk.END, f"[{self.get_time()}] {data}\n")
-                    self.terminal.see(tk.END)
+                    # 只有当滚动条在最底部时才自动跟随
+                    scroll_position = self.terminal.yview()
+                    if scroll_position[1] >= 0.99:
+                        self.terminal.see(tk.END)
                     
                     # 检测是否是多智能体系统的日志，如果是，也显示在AI策略中心和实盘监控日志中
                     multi_agent_keywords = [
@@ -2307,9 +3116,15 @@ class KronosTradingGUI:
                         "市场情绪", "风险等级", "交易建议", "CoinGecko", "币安"
                     ]
                     
-                    is_multi_agent_log = any(keyword in data for keyword in multi_agent_keywords)
+                    exclude_keywords = [
+                        "[Qwen新闻处理器]", "[社交媒体情绪]", "qwen_news_processor", 
+                        "social_sentiment"
+                    ]
                     
-                    if is_multi_agent_log:
+                    is_multi_agent_log = any(keyword in data for keyword in multi_agent_keywords)
+                    is_excluded_log = any(keyword in data for keyword in exclude_keywords)
+                    
+                    if is_multi_agent_log and not is_excluded_log:
                         # 确定日志级别
                         level = "INFO"
                         if any(keyword in data for keyword in ["✓", "成功", "完成"]):
@@ -2327,6 +3142,9 @@ class KronosTradingGUI:
                     # self.status_label.config(text=f"进度: {data}%")
                 elif msg_type == "status":
                     self.status_label.config(text=data)
+                elif msg_type == "kronos_analysis":
+                    # 更新Kronos趋势分析图表
+                    self.update_kronos_analysis(**data)
 
         except queue.Empty:
             pass
@@ -2390,6 +3208,14 @@ class KronosTradingGUI:
 
         self.log("正在停止交易...")
 
+        # 恢复默认参数
+        if hasattr(self, 'strategy') and self.strategy is not None:
+            self.log("恢复默认参数...")
+            try:
+                self.strategy.restore_default_parameters()
+            except Exception as e:
+                self.log(f"恢复默认参数时出错: {e}")
+
         # 等待线程真正结束（最多等待10秒）
         if self.trading_thread is not None and self.trading_thread.is_alive():
             self.log("等待交易线程完全停止...")
@@ -2407,6 +3233,7 @@ class KronosTradingGUI:
         sys.stderr = sys.__stderr__
 
         self.stop_interval_timer()
+        self.stop_loss_check_timer()
         self.is_running = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -2459,6 +3286,22 @@ class KronosTradingGUI:
 
             BinanceAPI()
 
+            # 定义线程安全的Kronos分析回调函数
+            def analysis_callback(history_timestamps=None, history_prices=None, 
+                                  pred_timestamps=None, pred_prices=None,
+                                  trend_direction='NEUTRAL', trend_strength=0, 
+                                  pred_change=0, threshold=0.008):
+                self.queue.put(("kronos_analysis", {
+                    'history_timestamps': history_timestamps,
+                    'history_prices': history_prices,
+                    'pred_timestamps': pred_timestamps,
+                    'pred_prices': pred_prices,
+                    'trend_direction': trend_direction,
+                    'trend_strength': trend_strength,
+                    'pred_change': pred_change,
+                    'threshold': threshold
+                }))
+            
             self.log("正在创建策略...")
             self.strategy = ProfessionalTradingStrategy(
                 symbol=symbol,
@@ -2473,22 +3316,41 @@ class KronosTradingGUI:
                 ai_min_deviation=ai_min_deviation,
                 max_funding=max_funding,
                 min_funding=min_funding,
+                analysis_callback=analysis_callback
             )
 
-            # 设置确认次数
+            # 设置确认次数和新参数 - 从AI策略配置面板读取
             try:
-                entry_count = int(self.entry_confirm_count_var.get())
-                reverse_count = int(self.reverse_confirm_count_var.get())
+                # 从AI策略配置面板读取最新参数
+                if hasattr(self, "ai_strategy_config_vars"):
+                    entry_count = int(self.ai_strategy_config_vars.get("strategy.entry_confirm_count", self.entry_confirm_count_var).get())
+                    reverse_count = int(self.ai_strategy_config_vars.get("strategy.reverse_confirm_count", self.reverse_confirm_count_var).get())
+                    consecutive_pred = int(self.ai_strategy_config_vars.get("strategy.require_consecutive_prediction", self.require_consecutive_prediction_var).get())
+                    post_entry_hours = float(self.ai_strategy_config_vars.get("strategy.post_entry_hours", self.post_entry_hours_var).get())
+                    take_profit_min_pct = float(self.ai_strategy_config_vars.get("strategy.take_profit_min_pct", self.take_profit_min_pct_var).get())
+                else:
+                    # 降级到旧变量
+                    entry_count = int(self.entry_confirm_count_var.get())
+                    reverse_count = int(self.reverse_confirm_count_var.get())
+                    consecutive_pred = int(self.require_consecutive_prediction_var.get())
+                    post_entry_hours = float(self.post_entry_hours_var.get())
+                    take_profit_min_pct = float(self.take_profit_min_pct_var.get())
                 
                 # 验证范围
                 if 1 <= entry_count <= 10:
                     self.strategy.entry_confirm_count = entry_count
                 if 1 <= reverse_count <= 10:
                     self.strategy.reverse_confirm_count = reverse_count
+                if 1 <= consecutive_pred <= 10:
+                    self.strategy.require_consecutive_prediction = consecutive_pred
+                if 0.5 <= post_entry_hours <= 24:
+                    self.strategy.post_entry_hours = post_entry_hours
+                if 0.1 <= take_profit_min_pct <= 10:
+                    self.strategy.take_profit_min_pct = take_profit_min_pct
                     
-                self.log(f"确认次数设置: 开仓{entry_count}次, 平仓{reverse_count}次")
+                self.log(f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%")
             except Exception as e:
-                self.log(f"设置确认次数失败: {e}, 使用默认值(2次)")
+                self.log(f"设置参数失败: {e}, 使用默认值")
 
             # 设置性能监控器的策略实例（如果存在）
             if hasattr(self, 'performance_monitor') and self.performance_monitor:
@@ -2507,11 +3369,17 @@ class KronosTradingGUI:
             # 获取初始资金（合约仓位总资金，包含持仓盈亏）
             initial_balance = self.strategy.binance.get_total_balance()
             self.initial_futures_balance = initial_balance if initial_balance else 0.0
+            self.optimization_baseline_balance = self.initial_futures_balance
             self.update_fund_display()
             self.log(f"初始合约资金(总资金): ${self.initial_futures_balance:.2f}")
+            self.log(f"AI优化基准资金: ${self.optimization_baseline_balance:.2f}")
+            
+            # 最后交易时间保持为None，让策略自己管理
 
             # 启动资金更新定时器
             self.update_fund_timer()
+            # 启动亏损检查定时器
+            self.start_loss_check_timer()
 
             self.set_status("运行中...")
             self.start_interval_timer(interval)
@@ -2574,6 +3442,158 @@ class KronosTradingGUI:
             self.update_fund_display()
             # 每5秒更新一次
             self.root.after(5000, self.update_fund_timer)
+
+    def start_loss_check_timer(self):
+        """启动亏损检查定时器（每5分钟检查一次）"""
+        if self.is_running:
+            self.check_loss_and_optimize()
+            self.loss_check_timer = self.root.after(300000, self.start_loss_check_timer)
+
+    def stop_loss_check_timer(self):
+        """停止亏损检查定时器"""
+        if self.loss_check_timer is not None:
+            try:
+                self.root.after_cancel(self.loss_check_timer)
+            except:
+                pass
+            self.loss_check_timer = None
+
+    def check_loss_and_optimize(self):
+        """检查亏损和无交易时间并在需要时触发AI优化"""
+        if not self.is_running or not hasattr(self, "strategy"):
+            return
+
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            optimize_triggered = False
+            optimization_reason = ""
+            optimization_details = None
+            
+            # ===============================
+            # 1. 检查亏损
+            # ===============================
+            current_balance = self.strategy.get_total_balance()
+            if current_balance and self.optimization_baseline_balance > 0:
+                # 计算从优化基准资金以来的亏损
+                loss_pct = ((self.optimization_baseline_balance - current_balance) / self.optimization_baseline_balance) * 100
+                
+                try:
+                    loss_trigger = float(self.loss_trigger_var.get())
+                except:
+                    loss_trigger = 10.0
+
+                self.log(f"[亏损检查] 基准资金: ${self.optimization_baseline_balance:.2f}, 当前: ${current_balance:.2f}, 亏损: {loss_pct:.2f}%")
+
+                if loss_pct >= loss_trigger:
+                    self.log(f"[亏损触发] 亏损超过{loss_trigger}%，启动AI策略优化...")
+                    optimize_triggered = True
+                    optimization_reason = "loss_trigger"
+                    optimization_details = {
+                        "loss_pct": loss_pct,
+                        "trigger": "亏损触发"
+                    }
+                else:
+                    self.log(f"[亏损检查] 亏损{loss_pct:.2f}% < 阈值{loss_trigger}%，无需优化")
+            
+            # ===============================
+            # 2. 检查无交易时间（12小时）
+            # ===============================
+            # 检查是否有持仓 - 用于无交易优化
+            has_position = False
+            if hasattr(self.strategy, "current_position") and self.strategy.current_position:
+                has_position = True
+            
+            if not has_position and self.strategy.last_trade_time:
+                # 只有在没有持仓且有过交易记录时，才检查距离最后交易时间
+                time_since_last_trade = now - self.strategy.last_trade_time
+                hours_since_last_trade = time_since_last_trade.total_seconds() / 3600
+                self.log(f"[无交易检查] 距最后交易: {hours_since_last_trade:.1f}小时 (阈值: 12小时)")
+                
+                if hours_since_last_trade >= 12.0:
+                    self.log(f"[无交易触发] 12小时无交易，启动AI策略优化...")
+                    optimize_triggered = True
+                    optimization_reason = "no_trade"
+                    optimization_details = {
+                        "hours_since_last_trade": hours_since_last_trade,
+                        "last_trade_time": self.strategy.last_trade_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        "trigger": "12小时无交易"
+                    }
+            
+            # ===============================
+            # 3. 如果有优化触发，执行优化
+            # ===============================
+            if optimize_triggered:
+                self.trigger_ai_optimization(
+                    loss_pct=optimization_details.get("loss_pct", 0.0) if optimization_reason == "loss_trigger" else 0.0,
+                    optimization_reason=optimization_reason,
+                    optimization_details=optimization_details
+                )
+
+        except Exception as e:
+            self.log(f"检查失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def trigger_ai_optimization(self, loss_pct: float = 0.0, optimization_reason: str = None, optimization_details: dict = None):
+        """触发AI策略优化
+        
+        Args:
+            loss_pct: 亏损百分比（如果是亏损触发）
+            optimization_reason: 优化原因（"loss_trigger", "no_trade", "regular"）
+            optimization_details: 优化详细信息字典
+        """
+        try:
+            self.log("正在启动AI策略优化...")
+            
+            # 如果没有提供优化原因，根据 loss_pct 推断
+            if optimization_reason is None:
+                optimization_reason = "loss_trigger" if loss_pct > 0 else "regular"
+            
+            # 先检查是否有多智能体系统
+            if hasattr(self, "strategy_coordinator") and self.strategy_coordinator:
+                # 使用多智能体系统进行优化
+                self.log("使用多智能体系统优化参数...")
+                # 这里可以添加具体的优化调用
+            else:
+                # 调用性能监控器的优化功能
+                if hasattr(self, "performance_monitor") and self.performance_monitor:
+                    self.log("使用性能监控器优化参数...")
+                    self.performance_monitor.optimize_strategy()
+            
+            # 调用Qwen优化器进行参数优化
+            if hasattr(self, "strategy") and hasattr(self.strategy, "qwen_optimizer") and self.strategy.qwen_optimizer:
+                self.log("使用Qwen优化器优化参数...")
+                # 获取K线数据用于Qwen优化
+                if hasattr(self.strategy, "binance") and hasattr(self.strategy, "symbol") and hasattr(self.strategy, "timeframe"):
+                    from strategy_config import StrategyConfig
+                    df = self.strategy.binance.get_recent_klines(
+                        self.strategy.symbol, 
+                        self.strategy.timeframe, 
+                        lookback=StrategyConfig.LOOKBACK_PERIOD
+                    )
+                    if df is not None and len(df) >= 50:
+                        # 直接调用Qwen优化器，传递优化原因
+                        self.strategy._run_qwen_optimization(
+                            df, 
+                            risk_profile="balanced",
+                            optimization_reason=optimization_reason,
+                            optimization_details=optimization_details
+                        )
+                        self.log("Qwen优化器执行完成")
+                    else:
+                        self.log("K线数据不足，跳过Qwen优化")
+            
+            # 优化后，更新基准资金为当前资金
+            current_balance = self.strategy.get_total_balance()
+            if current_balance:
+                self.optimization_baseline_balance = current_balance
+                self.log(f"AI优化完成！新的基准资金: ${self.optimization_baseline_balance:.2f}")
+                
+        except Exception as e:
+            self.log(f"AI优化触发失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _create_system_tab(self, parent):
         """创建系统监控标签页"""
@@ -2850,7 +3870,7 @@ class KronosTradingGUI:
         )
         data_frame = ttk.Frame(train_config_frame)
         data_frame.pack(fill=tk.X, pady=(0, 5))
-        self.train_data_path_var = tk.StringVar(value="")
+        self.train_data_path_var = tk.StringVar(value="training_data/BTCUSDT_5m_with_indicators.csv")
         self.train_data_entry = ttk.Entry(
             data_frame, textvariable=self.train_data_path_var
         )
@@ -2864,7 +3884,7 @@ class KronosTradingGUI:
         config_file_frame = ttk.Frame(train_config_frame)
         config_file_frame.pack(fill=tk.X, pady=(0, 5))
         self.train_config_path_var = tk.StringVar(
-            value="Kronos/finetune_csv/configs/config_ali09988_candle-5min.yaml"
+            value="Kronos/finetune_csv/config.yaml"
         )
         self.train_config_entry = ttk.Entry(
             config_file_frame, textvariable=self.train_config_path_var
@@ -3196,7 +4216,7 @@ class KronosTradingGUI:
         # 版本信息
         version_label = ttk.Label(
             info_frame,
-            text="版本 1.0 · 黑猫交易系统v1.0",
+            text="版本 2.0 · 黑猫交易系统v2.0",
             font=("微软雅黑", 8),
             foreground="#95a5a6",
         )
@@ -3928,6 +4948,148 @@ class KronosTradingGUI:
         # 同时写入训练日志文件
         if hasattr(self, "train_logger"):
             self.train_logger.info(message)
+    
+    def _calculate_all_technical_indicators(self, df):
+        """计算所有27个技术指标"""
+        import numpy as np
+        import pandas as pd
+        
+        df = df.copy()
+        
+        # 基础价格数据
+        close = df["close"].values
+        high = df["high"].values
+        low = df["low"].values
+        
+        # 安全获取amount列（训练时用的是 amt 和 vol）
+        if "amt" in df.columns:
+            amount = df["amt"].values
+        elif "amount" in df.columns:
+            amount = df["amount"].values
+            df["amt"] = amount
+        elif "volume" in df.columns:
+            amount = df["volume"].values
+            df["amt"] = amount
+        else:
+            amount = np.zeros(len(df))
+            df["amt"] = amount
+        
+        # 添加训练时用的 vol 列
+        if "vol" not in df.columns:
+            if "volume" in df.columns:
+                df["vol"] = df["volume"].values
+            else:
+                df["vol"] = amount
+        
+        # 1. MA5, MA10, MA20
+        df["MA5"] = pd.Series(close).rolling(window=5).mean().values
+        df["MA10"] = pd.Series(close).rolling(window=10).mean().values
+        df["MA20"] = pd.Series(close).rolling(window=20).mean().values
+        
+        # 2. 乖离率
+        df["BIAS20"] = (close / df["MA20"] - 1) * 100
+        
+        # 3. ATR(14)
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = 0
+        df["ATR14"] = pd.Series(tr).rolling(window=14).mean().values
+        
+        # 4. 振幅
+        df["AMPLITUDE"] = (high - low) / close * 100
+        
+        # 5. 成交额MA5, MA10
+        df["AMOUNT_MA5"] = pd.Series(amount).rolling(window=5).mean().values
+        df["AMOUNT_MA10"] = pd.Series(amount).rolling(window=10).mean().values
+        df["VOL_RATIO"] = amount / df["AMOUNT_MA5"]
+        
+        # 6. RSI(14) 和 RSI(7)
+        delta = pd.Series(close).diff()
+        gain = delta.where(delta > 0, 0)
+        loss = (-delta.where(delta < 0, 0))
+        avg_gain14 = gain.rolling(window=14).mean()
+        avg_loss14 = loss.rolling(window=14).mean()
+        rs14 = avg_gain14 / avg_loss14
+        df["RSI14"] = (100 - (100 / (1 + rs14))).values
+        
+        avg_gain7 = gain.rolling(window=7).mean()
+        avg_loss7 = loss.rolling(window=7).mean()
+        rs7 = avg_gain7 / avg_loss7
+        df["RSI7"] = (100 - (100 / (1 + rs7))).values
+        
+        # 7. MACD线 和 MACD柱
+        ema12 = pd.Series(close).ewm(span=12, adjust=False).mean()
+        ema26 = pd.Series(close).ewm(span=26, adjust=False).mean()
+        df["MACD"] = ema12 - ema26
+        df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
+        df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
+        
+        # 8. 价格斜率(5期) 和 (10期)
+        df["PRICE_SLOPE5"] = (
+            pd.Series(close)
+            .rolling(window=5)
+            .apply(
+                lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                raw=True,
+            )
+            .values
+        )
+        df["PRICE_SLOPE10"] = (
+            pd.Series(close)
+            .rolling(window=10)
+            .apply(
+                lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                raw=True,
+            )
+            .values
+        )
+        
+        # 9. 近5日/10日最高/最低
+        df["HIGH5"] = pd.Series(high).rolling(window=5).max().values
+        df["LOW5"] = pd.Series(low).rolling(window=5).min().values
+        df["HIGH10"] = pd.Series(high).rolling(window=10).max().values
+        df["LOW10"] = pd.Series(low).rolling(window=10).min().values
+        
+        # 10. 成交量突破
+        df["VOL_BREAKOUT"] = (amount > df["AMOUNT_MA5"] * 1.5).astype(int).values
+        df["VOL_SHRINK"] = (amount < df["AMOUNT_MA5"] * 0.5).astype(int).values
+        
+        # 选择需要的27个特征
+        feature_list = [
+            "open", "high", "low", "close", "vol", "amt", 
+            "MA5", "MA10", "MA20",
+            "BIAS20",
+            "ATR14", "AMPLITUDE",
+            "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO",
+            "RSI14", "RSI7",
+            "MACD", "MACD_HIST",
+            "PRICE_SLOPE5", "PRICE_SLOPE10",
+            "HIGH5", "LOW5", "HIGH10", "LOW10",
+            "VOL_BREAKOUT", "VOL_SHRINK"
+        ]
+        
+        # 确保所有列都存在
+        for col in feature_list:
+            if col not in df.columns:
+                df[col] = 0.0
+        
+        # 保留时间列 + 特征列，并去除含 NaN 的行
+        time_col = None
+        if "timestamps" in df.columns:
+            time_col = "timestamps"
+        elif "datetime" in df.columns:
+            time_col = "datetime"
+        
+        if time_col:
+            df = df[[time_col] + feature_list]
+        else:
+            df = df[feature_list]
+        
+        df = df.dropna()
+        
+        return df
 
     def download_binance_data(self):
         """下载币安历史数据"""
@@ -4076,13 +5238,37 @@ class KronosTradingGUI:
 
             df.to_csv(save_path, index=False)
 
-            self.log_train(f"数据已保存: {save_path}")
-            self.log_train(f"数据量: {len(df)} 条")
+            self.log_train(f"原始数据已保存: {save_path}")
+            self.log_train(f"原始数据量: {len(df)} 条")
             self.log_train(
                 f"时间范围: {df['timestamps'].min()} 至 {df['timestamps'].max()}"
             )
-            self.train_data_path_var.set(save_path)
-            self.train_status_label.config(text=f"数据下载完成: {len(df)}条")
+            
+            # 自动计算技术指标，生成带27个特征的训练文件
+            self.log_train("\n正在计算技术指标...")
+            try:
+                # 调用我们的技术指标计算函数
+                df_with_indicators = self._calculate_all_technical_indicators(df)
+                
+                # 生成带指标的文件名
+                save_path_with_indicators = save_path.replace(".csv", "_with_indicators.csv")
+                df_with_indicators.to_csv(save_path_with_indicators, index=False)
+                
+                self.log_train(f"✓ 技术指标计算完成！")
+                self.log_train(f"✓ 带指标的数据已保存: {save_path_with_indicators}")
+                self.log_train(f"✓ 特征数: {len(df_with_indicators.columns)}")
+                self.log_train(f"✓ 有效数据量: {len(df_with_indicators)} 条")
+                
+                # 自动设置训练数据路径为带指标的文件
+                self.train_data_path_var.set(save_path_with_indicators)
+                self.train_status_label.config(text=f"数据准备完成: {len(df_with_indicators)}条(含指标)")
+            except Exception as e:
+                self.log_train(f"技术指标计算失败: {e}")
+                import traceback
+                self.log_train(traceback.format_exc())
+                # 如果技术指标计算失败，就用原始数据
+                self.train_data_path_var.set(save_path)
+                self.train_status_label.config(text=f"数据下载完成: {len(df)}条")
 
         except Exception as e:
             self.log_train(f"下载异常: {e}")
@@ -4422,6 +5608,17 @@ class KronosTradingGUI:
         if self.news_auto_refresh_job:
             self.root.after_cancel(self.news_auto_refresh_job)
         self._stop_balance_recording()
+        
+        # 清理信号文件
+        try:
+            import os
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            signal_file = os.path.join(base_dir, "_splash_close.txt")
+            if os.path.exists(signal_file):
+                os.remove(signal_file)
+        except Exception as e:
+            print(f"清理信号文件失败: {e}")
+        
         if self.is_running:
             if messagebox.askokcancel("退出", "交易正在运行，确定要退出吗？"):
                 self.stop_event.set()
@@ -4430,360 +5627,677 @@ class KronosTradingGUI:
         else:
             self.root.destroy()
 
-    def _create_ai_strategy_tab(self, parent):
-        """创建AI策略中心标签页（优化版 - 简洁布局）"""
-        # 主框架
+    def _create_ai_trading_tab(self, parent):
         main_frame = ttk.Frame(parent, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = ttk.Label(main_frame, text="🤖 AI实盘策略", font=("微软雅黑", 18, "bold"), foreground="#2c3e50")
+        title_label.pack(pady=(0, 8))
+
+        desc_label = ttk.Label(main_frame, text="实盘策略配置与管理", font=("微软雅黑", 10), foreground="#7f8c8d")
+        desc_label.pack(pady=(0, 15))
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(button_frame, text="📋 交易风格预设:").pack(side=tk.LEFT, padx=(0, 5))
+        self.ai_strategy_preset_var = tk.StringVar(value="平衡型")
+        preset_combo = ttk.Combobox(
+            button_frame, 
+            textvariable=self.ai_strategy_preset_var,
+            values=["激进超短线", "平衡型", "稳健短线"],
+            state="readonly",
+            width=15
+        )
+        preset_combo.pack(side=tk.LEFT, padx=(0, 10))
+        preset_combo.bind("<<ComboboxSelected>>", self._on_ai_strategy_preset_changed)
+        
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="📁 载入配置", command=self._load_ai_strategy_config).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="💾 保存配置", command=self._save_ai_strategy_config).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="↩️ 重置默认", command=self._reset_ai_strategy_default).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(button_frame, text="✅ 应用配置", command=self._apply_ai_strategy_config, style="Accent.TButton").pack(side=tk.RIGHT, padx=(5, 0))
+
+        self.ai_strategy_notebook = ttk.Notebook(main_frame)
+        self.ai_strategy_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        self.ai_strategy_config_vars = {}
+        self._create_ai_strategy_coordinator_tab()
+        self._create_ai_strategy_basic_tab()
+        self._create_ai_strategy_entry_tab()
+        self._create_ai_strategy_stop_loss_tab()
+        self._create_ai_strategy_take_profit_tab()
+        self._create_ai_strategy_risk_tab()
+        self._create_ai_strategy_frequency_tab()
+        self._create_ai_strategy_position_tab()
+        self._create_ai_strategy_strategy_tab()
+        
+        self._load_ai_strategy_config_to_ui()
+    
+    def _get_default_ai_strategy_config(self):
+        return {
+            "coordinator": {
+                "min_signal_strength": 0.15,
+                "max_position_size": 0.1,
+                "sentiment_weight": 0.3,
+                "technical_weight": 0.7,
+                "black_swan_threshold": "HIGH",
+                "enable_adaptive_filtering": True
+            },
+            "basic": {
+                "LEVERAGE": 10,
+                "TREND_STRENGTH_THRESHOLD": 0.0047,
+                "LOOKBACK_PERIOD": 91,
+                "PREDICTION_LENGTH": 90,
+                "CHECK_INTERVAL": 180
+            },
+            "entry": {
+                "max_kline_change": 0.015,
+                "max_funding_rate_long": 0.03,
+                "min_funding_rate_short": -0.03,
+                "support_buffer": 1.001,
+                "resistance_buffer": 0.999
+            },
+            "stop_loss": {
+                "long_buffer": 0.996,
+                "short_buffer": 1.004
+            },
+            "take_profit": {
+                "tp1_multiplier_long": 1.025,
+                "tp2_multiplier_long": 1.05,
+                "tp3_multiplier_long": 1.14,
+                "tp1_multiplier_short": 0.975,
+                "tp2_multiplier_short": 0.95,
+                "tp3_multiplier_short": 0.86,
+                "tp1_position_ratio": 0.35,
+                "tp2_position_ratio": 0.35,
+                "tp3_position_ratio": 0.30
+            },
+            "risk": {
+                "single_trade_risk": 0.029,
+                "daily_loss_limit": 0.12,
+                "max_consecutive_losses": 6,
+                "max_single_position": 0.29,
+                "max_daily_position": 0.85
+            },
+            "frequency": {
+                "max_daily_trades": 55,
+                "min_trade_interval_minutes": 3,
+                "active_hours_start": 0,
+                "active_hours_end": 24
+            },
+            "position": {
+                "initial_entry_ratio": 0.35,
+                "confirm_interval_kline": 2,
+                "add_on_profit": True,
+                "add_ratio": 0.25,
+                "max_add_times": 3
+            },
+            "strategy": {
+                "entry_confirm_count": 3,
+                "reverse_confirm_count": 2,
+                "require_consecutive_prediction": 2,
+                "post_entry_hours": 6,
+                "take_profit_min_pct": 0.5
+            }
+        }
+    
+    def _create_ai_strategy_param_row(self, parent, category, param_name, display_name, param_type, min_val=None, max_val=None, description=""):
+        row_frame = ttk.Frame(parent)
+        row_frame.pack(fill=tk.X, pady=2)
+        
+        name_label = ttk.Label(row_frame, text=display_name, width=25, anchor=tk.W)
+        name_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        var_key = f"{category}.{param_name}"
+        
+        if param_type == "float":
+            var = tk.DoubleVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        elif param_type == "int":
+            var = tk.IntVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        elif param_type == "bool":
+            var = tk.BooleanVar()
+            entry = ttk.Checkbutton(row_frame, variable=var)
+        elif param_type == "select":
+            var = tk.StringVar()
+            entry = ttk.Combobox(row_frame, textvariable=var, values=["LOW", "MEDIUM", "HIGH"], state="readonly", width=10)
+        else:
+            var = tk.StringVar()
+            entry = ttk.Entry(row_frame, textvariable=var, width=12)
+        
+        entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.ai_strategy_config_vars[var_key] = var
+        
+        # 为strategy分类的参数添加trace回调，同步更新旧变量
+        if category == "strategy":
+            def on_var_change(*args, key=var_key, var_obj=var):
+                try:
+                    value = var_obj.get()
+                    if key == "strategy.entry_confirm_count" and hasattr(self, "entry_confirm_count_var"):
+                        self.entry_confirm_count_var.set(value)
+                    elif key == "strategy.reverse_confirm_count" and hasattr(self, "reverse_confirm_count_var"):
+                        self.reverse_confirm_count_var.set(value)
+                    elif key == "strategy.require_consecutive_prediction" and hasattr(self, "require_consecutive_prediction_var"):
+                        self.require_consecutive_prediction_var.set(value)
+                    elif key == "strategy.post_entry_hours" and hasattr(self, "post_entry_hours_var"):
+                        self.post_entry_hours_var.set(value)
+                    elif key == "strategy.take_profit_min_pct" and hasattr(self, "take_profit_min_pct_var"):
+                        self.take_profit_min_pct_var.set(value)
+                except Exception:
+                    pass
+            var.trace_add("write", on_var_change)
+        
+        if min_val is not None and max_val is not None:
+            range_label = ttk.Label(row_frame, text=f"[{min_val}-{max_val}]", width=15, foreground="#7f8c8d")
+            range_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        desc_label = ttk.Label(row_frame, text=description, foreground="#7f8c8d", wraplength=500)
+        desc_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    
+    def _create_ai_strategy_coordinator_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="1. 协调器参数")
+        
+        ttk.Label(frame, text="【协调器参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "coordinator", "min_signal_strength", "最小信号强度", "float", 0.0, 1.0, "只有信号强度超过此值才触发交易")
+        self._create_ai_strategy_param_row(frame, "coordinator", "max_position_size", "最大仓位比例", "float", 0.0, 1.0, "单次交易的最大仓位比例")
+        self._create_ai_strategy_param_row(frame, "coordinator", "sentiment_weight", "舆情信号权重", "float", 0.0, 1.0, "FinGPT舆情分析的权重")
+        self._create_ai_strategy_param_row(frame, "coordinator", "technical_weight", "技术信号权重", "float", 0.0, 1.0, "Kronos技术分析的权重")
+        self._create_ai_strategy_param_row(frame, "coordinator", "black_swan_threshold", "黑天鹅阈值", "select", None, None, "极端行情敏感度阈值")
+        self._create_ai_strategy_param_row(frame, "coordinator", "enable_adaptive_filtering", "自适应过滤", "bool", None, None, "启用动态参数调整")
+    
+    def _create_ai_strategy_basic_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="2. 基础参数")
+        
+        ttk.Label(frame, text="【基础参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "basic", "LEVERAGE", "杠杆倍数", "int", 1, 125, "交易使用的杠杆大小")
+        self._create_ai_strategy_param_row(frame, "basic", "TREND_STRENGTH_THRESHOLD", "趋势强度阈值", "float", 0.001, 0.05, "判断趋势有效的阈值")
+        self._create_ai_strategy_param_row(frame, "basic", "LOOKBACK_PERIOD", "回看K线数量", "int", 64, 2048, "技术分析使用的历史数据长度")
+        self._create_ai_strategy_param_row(frame, "basic", "PREDICTION_LENGTH", "预测K线数量", "int", 4, 200, "Kronos预测的未来K线数量")
+        self._create_ai_strategy_param_row(frame, "basic", "CHECK_INTERVAL", "检查间隔(秒)", "int", 30, 3600, "系统检查交易信号的间隔")
+    
+    def _create_ai_strategy_entry_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="3. 入场过滤")
+        
+        ttk.Label(frame, text="【入场过滤参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "entry", "max_kline_change", "最大单K变化", "float", 0.001, 0.05, "限制单根K线的最大涨跌幅")
+        self._create_ai_strategy_param_row(frame, "entry", "max_funding_rate_long", "多头最大资金费率", "float", -0.05, 0.05, "开多仓时资金费率上限")
+        self._create_ai_strategy_param_row(frame, "entry", "min_funding_rate_short", "空头最小资金费率", "float", -0.05, 0.05, "开空仓时资金费率下限")
+        self._create_ai_strategy_param_row(frame, "entry", "support_buffer", "支撑位缓冲", "float", 1.000, 1.010, "在支撑位上方多少比例入场")
+        self._create_ai_strategy_param_row(frame, "entry", "resistance_buffer", "阻力位缓冲", "float", 0.990, 1.000, "在阻力位下方多少比例入场")
+    
+    def _create_ai_strategy_stop_loss_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="4. 止损参数")
+        
+        ttk.Label(frame, text="【止损参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "stop_loss", "long_buffer", "多头止损缓冲", "float", 0.900, 0.999, "多头止损相对于入场价的比例")
+        self._create_ai_strategy_param_row(frame, "stop_loss", "short_buffer", "空头止损缓冲", "float", 1.001, 1.100, "空头止损相对于入场价的比例")
+    
+    def _create_ai_strategy_take_profit_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="5. 止盈参数")
+        
+        ttk.Label(frame, text="【止盈参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp1_multiplier_long", "多头第一止盈", "float", 1.001, 1.100, "多头第一止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp2_multiplier_long", "多头第二止盈", "float", 1.001, 1.200, "多头第二止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp3_multiplier_long", "多头第三止盈", "float", 1.001, 1.300, "多头第三止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp1_multiplier_short", "空头第一止盈", "float", 0.900, 0.999, "空头第一止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp2_multiplier_short", "空头第二止盈", "float", 0.800, 0.999, "空头第二止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp3_multiplier_short", "空头第三止盈", "float", 0.700, 0.999, "空头第三止盈目标")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp1_position_ratio", "第一止盈仓位", "float", 0.1, 1.0, "达到第一止盈时平掉的仓位比例")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp2_position_ratio", "第二止盈仓位", "float", 0.1, 1.0, "达到第二止盈时平掉的仓位比例")
+        self._create_ai_strategy_param_row(frame, "take_profit", "tp3_position_ratio", "第三止盈仓位", "float", 0.1, 1.0, "达到第三止盈时平掉的仓位比例")
+    
+    def _create_ai_strategy_risk_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="6. 风险管理")
+        
+        ttk.Label(frame, text="【风险管理参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "risk", "single_trade_risk", "单笔风险比例", "float", 0.001, 0.10, "单笔交易最大亏损比例")
+        self._create_ai_strategy_param_row(frame, "risk", "daily_loss_limit", "每日亏损限制", "float", 0.01, 0.20, "单日累计亏损达到此值停止交易")
+        self._create_ai_strategy_param_row(frame, "risk", "max_consecutive_losses", "最大连续亏损", "int", 1, 10, "连续亏损次数达到此值暂停交易")
+        self._create_ai_strategy_param_row(frame, "risk", "max_single_position", "最大单笔仓位", "float", 0.01, 1.0, "单笔交易的最大仓位比例")
+        self._create_ai_strategy_param_row(frame, "risk", "max_daily_position", "最大日仓位", "float", 0.01, 1.0, "单日累计开仓的最大仓位比例")
+    
+    def _create_ai_strategy_frequency_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="7. 交易频率")
+        
+        ttk.Label(frame, text="【交易频率参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "frequency", "max_daily_trades", "每日最大交易", "int", 1, 100, "限制单日最多交易多少次")
+        self._create_ai_strategy_param_row(frame, "frequency", "min_trade_interval_minutes", "最小间隔(分)", "int", 1, 60, "两次交易之间的最小间隔")
+        self._create_ai_strategy_param_row(frame, "frequency", "active_hours_start", "活跃开始时间", "int", 0, 23, "只在此时间之后进行交易")
+        self._create_ai_strategy_param_row(frame, "frequency", "active_hours_end", "活跃结束时间", "int", 1, 24, "只在此时间之前进行交易")
+    
+    def _create_ai_strategy_position_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="8. 仓位管理")
+        
+        ttk.Label(frame, text="【仓位管理参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "position", "initial_entry_ratio", "初始入场比例", "float", 0.1, 1.0, "首次开仓时使用目标仓位的比例")
+        self._create_ai_strategy_param_row(frame, "position", "confirm_interval_kline", "确认K线数量", "int", 1, 10, "初始入场后等待多少根K线确认趋势")
+        self._create_ai_strategy_param_row(frame, "position", "add_on_profit", "盈利加仓", "bool", None, None, "是否在盈利时加仓")
+        self._create_ai_strategy_param_row(frame, "position", "add_ratio", "加仓比例", "float", 0.1, 0.5, "每次加仓占目标仓位的比例")
+        self._create_ai_strategy_param_row(frame, "position", "max_add_times", "最大加仓次数", "int", 1, 10, "最多可以加仓多少次")
+    
+    def _create_ai_strategy_strategy_tab(self):
+        frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
+        self.ai_strategy_notebook.add(frame, text="9. 策略参数配置")
+        
+        ttk.Label(frame, text="【策略参数配置】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self._create_ai_strategy_param_row(frame, "strategy", "entry_confirm_count", "开仓确认次数", "int", 1, 10, "开仓信号需要确认的次数")
+        self._create_ai_strategy_param_row(frame, "strategy", "reverse_confirm_count", "平仓确认次数", "int", 1, 10, "平仓信号需要确认的次数")
+        self._create_ai_strategy_param_row(frame, "strategy", "require_consecutive_prediction", "连续预测确认", "int", 1, 10, "需要连续多少次预测一致才执行")
+        self._create_ai_strategy_param_row(frame, "strategy", "post_entry_hours", "开仓后计时(小时)平仓", "float", 0.5, 24, "开仓后多长时间自动平仓")
+        self._create_ai_strategy_param_row(frame, "strategy", "take_profit_min_pct", "最小止盈(%)", "float", 0.1, 10, "最小的止盈比例")
+    
+    def _load_ai_strategy_config_to_ui(self):
+        current_config = self._get_current_ai_strategy_config()
+        for category, params in current_config.items():
+            for param_name, value in params.items():
+                var_key = f"{category}.{param_name}"
+                if var_key in self.ai_strategy_config_vars:
+                    self.ai_strategy_config_vars[var_key].set(value)
+    
+    def _get_current_ai_strategy_config(self):
+        default_config = self._get_default_ai_strategy_config()
+        
+        try:
+            from strategy_config import StrategyConfig
+            default_config["basic"] = {
+                "LEVERAGE": StrategyConfig.LEVERAGE,
+                "TREND_STRENGTH_THRESHOLD": StrategyConfig.TREND_STRENGTH_THRESHOLD,
+                "LOOKBACK_PERIOD": StrategyConfig.LOOKBACK_PERIOD,
+                "PREDICTION_LENGTH": StrategyConfig.PREDICTION_LENGTH,
+                "CHECK_INTERVAL": StrategyConfig.CHECK_INTERVAL
+            }
+            default_config["entry"] = StrategyConfig.ENTRY_FILTER.copy()
+            default_config["stop_loss"] = StrategyConfig.STOP_LOSS.copy()
+            default_config["take_profit"] = StrategyConfig.TAKE_PROFIT.copy()
+            default_config["risk"] = StrategyConfig.RISK_MANAGEMENT.copy()
+            default_config["frequency"] = StrategyConfig.TRADE_FREQUENCY.copy()
+            default_config["position"] = StrategyConfig.POSITION_MANAGEMENT.copy()
+            if hasattr(StrategyConfig, "STRATEGY_CONFIG"):
+                default_config["strategy"] = StrategyConfig.STRATEGY_CONFIG.copy()
+        except Exception:
+            pass
+        
+        return default_config
+    
+    def _get_ai_strategy_config_from_ui(self):
+        config = {}
+        for category in ["coordinator", "basic", "entry", "stop_loss", "take_profit", "risk", "frequency", "position", "strategy"]:
+            config[category] = {}
+        
+        for var_key, var in self.ai_strategy_config_vars.items():
+            category, param_name = var_key.split(".", 1)
+            config[category][param_name] = var.get()
+        
+        return config
+    
+    def _apply_ai_strategy_config(self):
+        config = self._get_ai_strategy_config_from_ui()
+        self._apply_strategy_config(config)
+        messagebox.showinfo("成功", "策略配置已成功应用！")
+    
+    def _load_ai_strategy_config(self):
+        file_path = filedialog.askopenfilename(
+            title="载入配置",
+            filetypes=[("YAML文件", "*.yaml"), ("YAML文件", "*.yml"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    import yaml
+                    config = yaml.safe_load(f)
+                    self._load_ai_strategy_config_dict(config)
+                messagebox.showinfo("成功", "配置已载入！")
+            except Exception as e:
+                messagebox.showerror("错误", f"载入配置失败: {e}")
+    
+    def _save_ai_strategy_config(self):
+        config = self._get_ai_strategy_config_from_ui()
+        file_path = filedialog.asksaveasfilename(
+            title="保存配置",
+            defaultextension=".yaml",
+            filetypes=[("YAML文件", "*.yaml"), ("YAML文件", "*.yml"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            try:
+                import yaml
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                messagebox.showinfo("成功", "配置已保存！")
+            except Exception as e:
+                messagebox.showerror("错误", f"保存配置失败: {e}")
+    
+    def _reset_ai_strategy_default(self):
+        if messagebox.askyesno("确认", "确定要重置为默认配置吗？"):
+            default_config = self._get_default_ai_strategy_config()
+            self._load_ai_strategy_config_dict(default_config)
+    
+    def _load_ai_strategy_config_dict(self, config):
+        for category, params in config.items():
+            for param_name, value in params.items():
+                var_key = f"{category}.{param_name}"
+                if var_key in self.ai_strategy_config_vars:
+                    self.ai_strategy_config_vars[var_key].set(value)
+                    
+                    # 同步到旧的独立变量，保持一致性
+                    if category == "strategy":
+                        if param_name == "entry_confirm_count" and hasattr(self, "entry_confirm_count_var"):
+                            self.entry_confirm_count_var.set(value)
+                        elif param_name == "reverse_confirm_count" and hasattr(self, "reverse_confirm_count_var"):
+                            self.reverse_confirm_count_var.set(value)
+                        elif param_name == "require_consecutive_prediction" and hasattr(self, "require_consecutive_prediction_var"):
+                            self.require_consecutive_prediction_var.set(value)
+                        elif param_name == "post_entry_hours" and hasattr(self, "post_entry_hours_var"):
+                            self.post_entry_hours_var.set(value)
+                        elif param_name == "take_profit_min_pct" and hasattr(self, "take_profit_min_pct_var"):
+                            self.take_profit_min_pct_var.set(value)
+    
+    def _on_ai_strategy_preset_changed(self, event):
+        preset_name = self.ai_strategy_preset_var.get()
+        self._apply_ai_strategy_preset(preset_name)
+    
+    def _get_ai_strategy_preset_config(self, preset_name):
+        presets = {
+            "激进超短线": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 64,
+                    "PREDICTION_LENGTH": 10
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 5,
+                    "max_daily_trades": 30
+                },
+                "position": {
+                    "confirm_interval_kline": 1
+                }
+            },
+            "平衡型": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 96,
+                    "PREDICTION_LENGTH": 24
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 10,
+                    "max_daily_trades": 20
+                },
+                "position": {
+                    "confirm_interval_kline": 3
+                }
+            },
+            "稳健短线": {
+                "basic": {
+                    "LOOKBACK_PERIOD": 192,
+                    "PREDICTION_LENGTH": 30
+                },
+                "frequency": {
+                    "min_trade_interval_minutes": 20,
+                    "max_daily_trades": 10
+                },
+                "position": {
+                    "confirm_interval_kline": 5
+                }
+            }
+        }
+        return presets.get(preset_name, presets["平衡型"])
+    
+    def _apply_ai_strategy_preset(self, preset_name):
+        preset_config = self._get_ai_strategy_preset_config(preset_name)
+        current_config = self._get_ai_strategy_config_from_ui()
+        
+        for category, params in preset_config.items():
+            if category in current_config:
+                current_config[category].update(params)
+        
+        self._load_ai_strategy_config_dict(current_config)
+
+    def _create_ai_strategy_tab(self, parent):
+        """创建AI策略中心标签页 - 简化版，仅保留自动优化系统"""
+        # 主框架
+        main_frame = ttk.Frame(parent, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 标题
         title_label = ttk.Label(
             main_frame,
-            text="AI策略中心",
-            font=("微软雅黑", 16, "bold"),
+            text="🤖 AI策略中心",
+            font=("微软雅黑", 20, "bold"),
             foreground="#2c3e50",
         )
-        title_label.pack(pady=(0, 10))
+        title_label.pack(pady=(0, 5))
 
         # 说明文字
         desc_label = ttk.Label(
             main_frame,
-            text="集成Kronos、FinGPT、Qwen3三大AI模型，实现智能策略生成与优化",
-            font=("微软雅黑", 9),
+            text="AI定期分析市场，自动优化所有交易参数（开仓、平仓、止盈止损等）",
+            font=("微软雅黑", 11),
             foreground="#7f8c8d"
         )
-        desc_label.pack(pady=(0, 12))
+        desc_label.pack(pady=(0, 20))
 
         # ==================== 系统状态面板 ====================
         status_frame = ttk.Frame(main_frame)
-        status_frame.pack(fill=tk.X, pady=(0, 12))
+        status_frame.pack(fill=tk.X, pady=(0, 20))
         
         # FinGPT状态
         fingpt_status_frame = ttk.Frame(status_frame)
-        fingpt_status_frame.pack(side=tk.LEFT, padx=(0, 15))
+        fingpt_status_frame.pack(side=tk.LEFT, padx=(0, 20))
         
-        ttk.Label(fingpt_status_frame, text="FinGPT:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(fingpt_status_frame, text="FinGPT:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
         self.fingpt_status_label = ttk.Label(
             fingpt_status_frame,
             textvariable=self.fingpt_status_var,
-            font=("微软雅黑", 9, "bold"),
-            foreground="#e74c3c"
+            font=("微软雅黑", 10, "bold"),
+            foreground="#27ae60"
         )
         self.fingpt_status_label.pack(side=tk.LEFT)
         
         # 策略协调器状态
         coordinator_status_frame = ttk.Frame(status_frame)
-        coordinator_status_frame.pack(side=tk.LEFT, padx=(0, 15))
+        coordinator_status_frame.pack(side=tk.LEFT, padx=(0, 20))
         
-        ttk.Label(coordinator_status_frame, text="协调器:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(coordinator_status_frame, text="协调器:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
         self.coordinator_status_label = ttk.Label(
             coordinator_status_frame,
             textvariable=self.coordinator_status_var,
-            font=("微软雅黑", 9, "bold"),
-            foreground="#e74c3c"
+            font=("微软雅黑", 10, "bold"),
+            foreground="#27ae60"
         )
         self.coordinator_status_label.pack(side=tk.LEFT)
         
         # Qwen3状态
         qwen_status_frame = ttk.Frame(status_frame)
-        qwen_status_frame.pack(side=tk.LEFT, padx=(0, 15))
+        qwen_status_frame.pack(side=tk.LEFT)
         
-        ttk.Label(qwen_status_frame, text="Qwen3:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(qwen_status_frame, text="Qwen:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
         self.qwen_status_label = ttk.Label(
             qwen_status_frame,
             textvariable=self.qwen_status_var,
-            font=("微软雅黑", 9, "bold"),
-            foreground="#e74c3c"
+            font=("微软雅黑", 10, "bold"),
+            foreground="#27ae60"
         )
         self.qwen_status_label.pack(side=tk.LEFT)
+
+        # ==================== AI策略中心控制面板 ====================
+        scheduler_frame = ttk.LabelFrame(main_frame, text="🤖 AI策略中心 - 自动优化系统", padding="20")
+        scheduler_frame.pack(fill=tk.BOTH, expand=True)
         
-        # 监控状态
-        monitor_status_frame = ttk.Frame(status_frame)
-        monitor_status_frame.pack(side=tk.LEFT)
+        # 调度器状态和控制
+        scheduler_control_row = ttk.Frame(scheduler_frame)
+        scheduler_control_row.pack(fill=tk.X, pady=(0, 15))
         
-        ttk.Label(monitor_status_frame, text="监控:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        self.monitor_status_label = ttk.Label(
-            monitor_status_frame,
-            textvariable=self.monitor_status_var,
-            font=("微软雅黑", 9),
+        # 左侧：状态显示
+        status_left = ttk.Frame(scheduler_control_row)
+        status_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        ttk.Label(status_left, text="调度器状态:", font=("微软雅黑", 10)).pack(anchor=tk.W)
+        self.ai_scheduler_status_var = tk.StringVar(value="未启动")
+        scheduler_status_label = ttk.Label(
+            status_left,
+            textvariable=self.ai_scheduler_status_var,
+            font=("微软雅黑", 11, "bold"),
             foreground="#e74c3c"
         )
-        self.monitor_status_label.pack(side=tk.LEFT)
-
-        # ==================== 中间功能区域（两列布局） ====================
-        middle_frame = ttk.Frame(main_frame)
-        middle_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        scheduler_status_label.pack(anchor=tk.W)
         
-        # 左侧：策略配置面板
-        left_panel = ttk.LabelFrame(middle_frame, text="策略配置", padding="12")
-        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
-        
-        # 确认次数设置
-        confirm_frame = ttk.Frame(left_panel)
-        confirm_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(confirm_frame, text="确认次数:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 开仓确认
-        ttk.Label(confirm_frame, text="开仓:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        entry_confirm_spinbox = ttk.Spinbox(
-            confirm_frame,
-            from_=1,
-            to=10,
-            textvariable=self.entry_confirm_count_var,
-            width=8,
-            command=lambda: self._update_confirm_counts()
-        )
-        entry_confirm_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 平仓确认
-        ttk.Label(confirm_frame, text="平仓:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        reverse_confirm_spinbox = ttk.Spinbox(
-            confirm_frame,
-            from_=1,
-            to=10,
-            textvariable=self.reverse_confirm_count_var,
-            width=8,
-            command=lambda: self._update_confirm_counts()
-        )
-        reverse_confirm_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 应用按钮
-        ttk.Button(
-            confirm_frame,
-            text="应用",
-            command=self._apply_confirm_counts,
-            width=8
-        ).pack(side=tk.LEFT)
-        
-        # 自动化优化设置
-        auto_opt_frame = ttk.LabelFrame(left_panel, text="自动化优化", padding="10")
-        auto_opt_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        # 第一行：状态和开关
-        auto_status_row = ttk.Frame(auto_opt_frame)
-        auto_status_row.pack(fill=tk.X, pady=(0, 8))
-        
-        ttk.Label(auto_status_row, text="状态:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(status_left, text="上次优化:", font=("微软雅黑", 10)).pack(anchor=tk.W, pady=(8, 0))
+        self.last_optimization_var = tk.StringVar(value="--:--:--")
         ttk.Label(
-            auto_status_row,
-            textvariable=self.auto_optimization_status_var,
-            font=("微软雅黑", 9),
-            foreground="#27ae60"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+            status_left,
+            textvariable=self.last_optimization_var,
+            font=("微软雅黑", 10)
+        ).pack(anchor=tk.W)
+        
+        # 中间：控制按钮
+        control_middle = ttk.Frame(scheduler_control_row)
+        control_middle.pack(side=tk.LEFT, padx=20)
+        
+        self.start_scheduler_button = ttk.Button(
+            control_middle,
+            text="▶ 启动自动优化",
+            command=self._start_ai_scheduler,
+            style="Accent.TButton"
+        )
+        self.start_scheduler_button.pack(pady=(0, 8))
+        
+        self.stop_scheduler_button = ttk.Button(
+            control_middle,
+            text="⏹ 停止自动优化",
+            command=self._stop_ai_scheduler,
+            state=tk.DISABLED
+        )
+        self.stop_scheduler_button.pack()
+        
+        # 右侧：立即优化和设置
+        control_right = ttk.Frame(scheduler_control_row)
+        control_right.pack(side=tk.RIGHT)
         
         ttk.Button(
-            auto_status_row,
-            text="开关",
-            command=self._toggle_auto_optimization,
-            width=8
-        ).pack(side=tk.LEFT, padx=(0, 10))
+            control_right,
+            text="⚙️ 参数配置",
+            command=self._open_strategy_config
+        ).pack(pady=(0, 8))
         
         ttk.Button(
-            auto_status_row,
-            text="优化",
-            command=self._trigger_manual_optimization,
-            width=8
-        ).pack(side=tk.LEFT)
+            control_right,
+            text="⚡ 立即优化",
+            command=self._trigger_optimization_now
+        ).pack(pady=(0, 8))
         
-        # 第二行：阈值和频率
-        auto_config_row1 = ttk.Frame(auto_opt_frame)
-        auto_config_row1.pack(fill=tk.X, pady=(5, 5))
-        
-        ttk.Label(auto_config_row1, text="阈值:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        threshold_combo = ttk.Combobox(
-            auto_config_row1,
-            textvariable=self.optimization_threshold_var,
-            values=["宽松", "中等", "严格"],
-            state="readonly",
-            width=8
+        # 检查间隔设置
+        interval_frame = ttk.Frame(control_right)
+        interval_frame.pack()
+        ttk.Label(interval_frame, text="检查间隔(分钟):", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
+        self.optimization_interval_var = tk.IntVar(value=60)
+        interval_spinbox = ttk.Spinbox(
+            interval_frame,
+            from_=15,
+            to=1440,
+            textvariable=self.optimization_interval_var,
+            width=8,
+            font=("微软雅黑", 9)
         )
-        threshold_combo.pack(side=tk.LEFT, padx=(0, 10))
+        interval_spinbox.pack(side=tk.LEFT)
         
-        ttk.Label(auto_config_row1, text="频率:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        frequency_combo = ttk.Combobox(
-            auto_config_row1,
-            textvariable=self.optimization_frequency_var,
-            values=["每2分钟", "每5分钟", "每15分钟", "每小时"],
-            state="readonly",
-            width=10
+        # 优化参数说明
+        params_info_frame = ttk.LabelFrame(scheduler_frame, text="📊 AI优化参数说明", padding="10")
+        params_info_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        params_info_text = """AI策略中心会定期优化以下8大类共50+交易参数：
+
+【1. 协调器参数】
+   • min_signal_strength: 最小信号强度 (0.0-1.0)
+   • max_position_size: 最大仓位比例 (0.0-1.0)
+   • sentiment_weight: 舆情信号权重 (0.0-1.0)
+   • technical_weight: 技术信号权重 (0.0-1.0)
+   • black_swan_threshold: 黑天鹅风险阈值 (LOW/MEDIUM/HIGH)
+   • enable_adaptive_filtering: 自适应过滤开关
+
+【2. 基础参数】
+   • LEVERAGE: 杠杆倍数 (1-125)
+   • TREND_STRENGTH_THRESHOLD: 趋势强度阈值
+   • LOOKBACK_PERIOD: 回看K线数量
+   • CHECK_INTERVAL: 策略检查间隔(秒)
+
+【3. 入场过滤参数】
+   • max_kline_change: 最大单根K线变化
+   • max_funding_rate_long: 多头最大资金费率
+   • min_funding_rate_short: 空头最小资金费率
+   • support_buffer: 支撑位缓冲
+   • resistance_buffer: 阻力位缓冲
+
+【4. 止损参数】
+   • long_buffer: 多头止损缓冲
+   • short_buffer: 空头止损缓冲
+
+【5. 止盈参数】
+   • tp1_multiplier_long: 多头第一止盈倍数
+   • tp2_multiplier_long: 多头第二止盈倍数
+   • tp1_multiplier_short: 空头第一止盈倍数
+   • tp2_multiplier_short: 空头第二止盈倍数
+   • tp1_position_ratio: 第一止盈仓位比例
+
+【6. 风险管理参数】
+   • single_trade_risk: 单笔交易风险比例
+   • daily_loss_limit: 每日亏损限制
+   • max_consecutive_losses: 最大连续亏损次数
+   • pause_after_losses_minutes: 亏损后暂停时间
+   • max_single_position: 最大单笔仓位
+   • max_daily_position: 最大日仓位
+   • extreme_move_threshold: 极端波动阈值
+
+【7. 交易频率参数】
+   • max_daily_trades: 每日最大交易次数
+   • min_trade_interval_minutes: 最小交易间隔
+   • active_hours_start: 活跃开始时间
+   • active_hours_end: 活跃结束时间
+
+【8. 仓位管理参数】
+   • initial_entry_ratio: 初始入场比例
+   • confirm_interval_kline: 确认K线数量
+"""
+        
+        params_info_label = ttk.Label(
+            params_info_frame,
+            text=params_info_text,
+            font=("Consolas", 8),
+            foreground="#7f8c8d",
+            justify=tk.LEFT
         )
-        frequency_combo.pack(side=tk.LEFT)
+        params_info_label.pack(anchor=tk.W)
         
-        # 第三行：判断模式
-        auto_config_row2 = ttk.Frame(auto_opt_frame)
-        auto_config_row2.pack(fill=tk.X, pady=(5, 0))
+        # 优化历史
+        history_frame = ttk.LabelFrame(scheduler_frame, text="📋 优化历史", padding="10")
+        history_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         
-        ttk.Label(auto_config_row2, text="判断模式:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
-        judgment_mode_combo = ttk.Combobox(
-            auto_config_row2,
-            textvariable=self.optimization_judgment_mode_var,
-            values=["固定阈值", "AI判断", "混合模式"],
-            state="readonly",
-            width=12
-        )
-        judgment_mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.optimization_history_text = tk.Text(history_frame, height=10, font=("Consolas", 9), bg="#f8f9fa", relief=tk.FLAT, wrap=tk.WORD)
+        self.optimization_history_text.pack(fill=tk.BOTH, expand=True)
         
-        ttk.Button(
-            auto_config_row2,
-            text="应用模式",
-            command=self._apply_judgment_mode,
-            width=10
-        ).pack(side=tk.LEFT)
-        
-        # 右侧：AI策略操作面板
-        right_panel = ttk.LabelFrame(middle_frame, text="AI策略操作", padding="12")
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(6, 0))
-        
-        # Qwen3初始化行
-        qwen_init_frame = ttk.Frame(right_panel)
-        qwen_init_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(qwen_init_frame, text="Qwen3模型:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        self.qwen_status_label = ttk.Label(
-            qwen_init_frame,
-            textvariable=self.qwen_status_var,
-            font=("微软雅黑", 9),
-            foreground="#e74c3c"
-        )
-        self.qwen_status_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 自动初始化Qwen3优化器
+        history_scrollbar = ttk.Scrollbar(history_frame, orient=tk.VERTICAL, command=self.optimization_history_text.yview)
+        history_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.optimization_history_text.configure(yscrollcommand=history_scrollbar.set)
+
+        # 自动初始化Qwen
         self._auto_init_qwen3()
-        
-        ttk.Button(
-            qwen_init_frame,
-            text="初始化",
-            command=self._init_qwen3,
-            width=10
-        ).pack(side=tk.LEFT)
-        
-        # 策略生成行
-        strategy_gen_frame = ttk.Frame(right_panel)
-        strategy_gen_frame.pack(fill=tk.X, pady=(0, 8))
-        
-        ttk.Label(strategy_gen_frame, text="策略:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        strategy_combo = ttk.Combobox(
-            strategy_gen_frame,
-            textvariable=self.qwen_strategy_type_var,
-            values=["自动选择", "趋势跟踪", "均值回归", "突破策略", "高频刷单"],
-            state="readonly",
-            width=12
-        )
-        strategy_combo.pack(side=tk.LEFT, padx=(0, 5))
-        
-        ttk.Label(strategy_gen_frame, text="风险:", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 5))
-        risk_combo = ttk.Combobox(
-            strategy_gen_frame,
-            textvariable=self.qwen_risk_var,
-            values=["保守型", "平衡型", "激进型"],
-            state="readonly",
-            width=10
-        )
-        risk_combo.pack(side=tk.LEFT, padx=(0, 10))
-        
-        ttk.Button(
-            strategy_gen_frame,
-            text="生成",
-            command=self._generate_strategy_with_qwen,
-            width=8
-        ).pack(side=tk.LEFT)
-        
-        # 分析操作行
-        analysis_frame = ttk.Frame(right_panel)
-        analysis_frame.pack(fill=tk.X, pady=(0, 8))
-        
-        ttk.Button(
-            analysis_frame,
-            text="🔍 市场分析",
-            command=self._auto_analyze_market_with_qwen,
-            width=12
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        
-        ttk.Button(
-            analysis_frame,
-            text="🔧 参数优化",
-            command=self._optimize_params_with_qwen,
-            width=12
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        
-        ttk.Button(
-            analysis_frame,
-            text="📊 回测分析",
-            command=self._analyze_backtest_with_qwen,
-            width=12
-        ).pack(side=tk.LEFT)
-        
-        # 智能操作行
-        smart_frame = ttk.Frame(right_panel)
-        smart_frame.pack(fill=tk.X, pady=(8, 0))
-        
-        ttk.Label(smart_frame, text="智能操作:", font=("微软雅黑", 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
-        
-        ttk.Button(
-            smart_frame,
-            text="🚀 智能生成",
-            command=self._smart_strategy_generation,
-            width=15,
-            style="Accent.TButton"
-        ).pack(side=tk.LEFT)
-
-        # ==================== 交易日志区域 ====================
-        log_frame = ttk.LabelFrame(main_frame, text="交易日志", padding="10")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        # 日志控制按钮行
-        log_control_frame = ttk.Frame(log_frame)
-        log_control_frame.pack(fill=tk.X, pady=(0, 8))
-        
-        # 监控按钮
-        self.start_monitor_button = ttk.Button(
-            log_control_frame,
-            text="▶ 启动监控",
-            command=self._start_live_monitoring,
-            width=12,
-            style="Accent.TButton"
-        )
-        self.start_monitor_button.pack(side=tk.LEFT, padx=(0, 8))
-        
-        self.stop_monitor_button = ttk.Button(
-            log_control_frame,
-            text="⏹ 停止监控",
-            command=self._stop_live_monitoring,
-            width=12,
-            style="TButton"
-        )
-        self.stop_monitor_button.pack(side=tk.LEFT, padx=(0, 8))
-        self.stop_monitor_button.config(state=tk.DISABLED)
-        
-        # 清空日志按钮
-        ttk.Button(
-            log_control_frame,
-            text="🗑 清空日志",
-            command=self._clear_ai_strategy_log,
-            width=12
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        
-        # 日志文本框
-        self.ai_strategy_log_text = tk.Text(
-            log_frame,
-            height=12,
-            font=("Consolas", 9),
-            bg="#f8f9fa",
-            relief=tk.FLAT,
-            wrap=tk.WORD
-        )
-        self.ai_strategy_log_text.pack(fill=tk.BOTH, expand=True)
-
-        # 滚动条
-        scrollbar = ttk.Scrollbar(
-            log_frame, orient=tk.VERTICAL, command=self.ai_strategy_log_text.yview
-        )
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.ai_strategy_log_text.configure(yscrollcommand=scrollbar.set)
-
-        # 加载配置
-        self._load_live_config()
 
     def _create_live_monitor_tab(self, parent):
         """创建实盘监控标签页（简化版）"""
@@ -4921,14 +6435,23 @@ class KronosTradingGUI:
             relief=tk.FLAT,
             wrap=tk.WORD
         )
-        self.live_log_text.pack(fill=tk.BOTH, expand=True)
-
-        # 滚动条
-        scrollbar = ttk.Scrollbar(
-            log_frame, orient=tk.VERTICAL, command=self.live_log_text.yview
+        
+        # 传统滚动条（更宽更明显）
+        scrollbar = tk.Scrollbar(
+            log_frame, 
+            orient=tk.VERTICAL, 
+            command=self.live_log_text.yview,
+            width=25,
+            relief=tk.SUNKEN,
+            bg="#d3d3d3",
+            activebackground="#a9a9a9"
         )
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         self.live_log_text.configure(yscrollcommand=scrollbar.set)
+        
+        # 布局
+        self.live_log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 底部按钮框架
         button_frame = ttk.Frame(main_frame)
@@ -5359,8 +6882,6 @@ class KronosTradingGUI:
                 df['current_balance'],
                 color='green',
                 linewidth=2,
-                marker='o',
-                markersize=3,
                 label='当前资金'
             )
             
@@ -5431,12 +6952,15 @@ class KronosTradingGUI:
             import time
             
             binance = BinanceAPI()
+            last_balance_update = 0
+            last_stats_update = 0
             
             while self.is_live_monitoring:
                 try:
                     symbol = self.live_symbol_var.get()
+                    now = time.time()
                     
-                    # 获取当前价格
+                    # 获取当前价格（每5秒更新）
                     ticker = binance.client.futures_symbol_ticker(symbol=symbol)
                     
                     if ticker:
@@ -5455,7 +6979,7 @@ class KronosTradingGUI:
                         except:
                             self.price_change_var.set("0.00%")
                     
-                    # 获取持仓信息
+                    # 获取持仓信息（每5秒更新）
                     try:
                         positions = binance.client.futures_position_information(symbol=symbol)
                         has_position = False
@@ -5475,6 +6999,29 @@ class KronosTradingGUI:
                     except Exception as e:
                         self._log_live_message(f"获取持仓信息失败: {e}", "WARNING")
                     
+                    # 更新账户余额（每30秒更新）
+                    if now - last_balance_update > 30:
+                        try:
+                            total_balance = binance.get_total_balance()
+                            if total_balance is not None:
+                                self.account_balance_var.set(f"${total_balance:.2f}")
+                            else:
+                                balance = binance.get_account_balance()
+                                if balance:
+                                    for asset in balance:
+                                        if asset['asset'] == 'USDT':
+                                            available = float(asset['availableBalance'])
+                                            self.account_balance_var.set(f"${available:.2f}")
+                                            break
+                            last_balance_update = now
+                        except Exception as e:
+                            self._log_live_message(f"更新账户余额失败: {e}", "WARNING")
+                    
+                    # 更新交易汇总（每10秒更新）
+                    if now - last_stats_update > 10:
+                        self._update_trading_stats()
+                        last_stats_update = now
+                    
                     time.sleep(5)  # 每5秒更新一次
                     
                 except Exception as e:
@@ -5483,6 +7030,79 @@ class KronosTradingGUI:
                     
         except Exception as e:
             self._log_live_message(f"监控线程错误: {e}", "ERROR")
+    
+    def _update_trading_stats(self):
+        """更新交易汇总统计"""
+        try:
+            from datetime import datetime, timedelta
+            
+            today = datetime.now().date()
+            week_start = today - timedelta(days=today.weekday())
+            month_start = today.replace(day=1)
+            
+            today_trades = 0
+            today_profit = 0.0
+            week_trades = 0
+            week_profit = 0.0
+            month_trades = 0
+            month_profit = 0.0
+            
+            # 从strategy中读取交易历史
+            if hasattr(self, "strategy") and self.strategy and hasattr(self.strategy, "trade_history"):
+                for trade in self.strategy.trade_history:
+                    trade_time = trade.get("time")
+                    if trade_time:
+                        trade_date = trade_time.date()
+                        pnl_pct = trade.get("pnl_pct", 0.0)
+                        
+                        # 今日统计
+                        if trade_date == today:
+                            today_trades += 1
+                            today_profit += pnl_pct
+                        
+                        # 当周统计
+                        if trade_date >= week_start:
+                            week_trades += 1
+                            week_profit += pnl_pct
+                        
+                        # 当月统计
+                        if trade_date >= month_start:
+                            month_trades += 1
+                            month_profit += pnl_pct
+            
+            # 更新UI显示
+            self.today_trades_var.set(str(today_trades))
+            if today_profit >= 0:
+                self.today_profit_var.set(f"+{today_profit:.2f}%")
+                if hasattr(self, "today_profit_label"):
+                    self.today_profit_label.configure(foreground="#27ae60")
+            else:
+                self.today_profit_var.set(f"{today_profit:.2f}%")
+                if hasattr(self, "today_profit_label"):
+                    self.today_profit_label.configure(foreground="#e74c3c")
+            
+            self.week_trades_var.set(str(week_trades))
+            if week_profit >= 0:
+                self.week_profit_var.set(f"+{week_profit:.2f}%")
+                if hasattr(self, "week_profit_label"):
+                    self.week_profit_label.configure(foreground="#27ae60")
+            else:
+                self.week_profit_var.set(f"{week_profit:.2f}%")
+                if hasattr(self, "week_profit_label"):
+                    self.week_profit_label.configure(foreground="#e74c3c")
+            
+            self.month_trades_var.set(str(month_trades))
+            if month_profit >= 0:
+                self.month_profit_var.set(f"+{month_profit:.2f}%")
+                if hasattr(self, "month_profit_label"):
+                    self.month_profit_label.configure(foreground="#27ae60")
+            else:
+                self.month_profit_var.set(f"{month_profit:.2f}%")
+                if hasattr(self, "month_profit_label"):
+                    self.month_profit_label.configure(foreground="#e74c3c")
+            
+        except Exception as e:
+            self._log_live_message(f"更新交易汇总失败: {e}", "WARNING")
     
     def _run_fingpt_analysis(self, symbol: str):
         """运行FinGPT舆情分析并在终端显示结果"""
@@ -5571,8 +7191,10 @@ class KronosTradingGUI:
             self.live_log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
             self.live_log_text.insert(tk.END, f"{message}\n", level)
             
-            # 自动滚动到底部
-            self.live_log_text.see(tk.END)
+            # 只有当滚动条在最底部时才自动跟随
+            scroll_position = self.live_log_text.yview()
+            if scroll_position[1] >= 0.99:
+                self.live_log_text.see(tk.END)
         
         # 为AI策略中心日志文本框配置颜色标签
         if hasattr(self, 'ai_strategy_log_text'):
@@ -5586,8 +7208,10 @@ class KronosTradingGUI:
             self.ai_strategy_log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
             self.ai_strategy_log_text.insert(tk.END, f"{message}\n", level)
             
-            # 自动滚动到底部
-            self.ai_strategy_log_text.see(tk.END)
+            # 只有当滚动条在最底部时才自动跟随
+            scroll_position = self.ai_strategy_log_text.yview()
+            if scroll_position[1] >= 0.99:
+                self.ai_strategy_log_text.see(tk.END)
 
     def _clear_live_log(self):
         """清空实盘监控日志（同时清空两个日志文本框）"""
@@ -5728,7 +7352,7 @@ class KronosTradingGUI:
             from qwen3_optimizer import Qwen3Optimizer
             
             self.qwen_optimizer = Qwen3Optimizer(
-                model_path=os.path.join(os.path.dirname(__file__), "models", "Qwen2.5-0.5B-Instruct"),  # 本地模型路径
+                model_path=os.path.join(os.path.dirname(__file__), "models", "Qwen3.5-0.8B-Instruct"),  # 本地模型路径
                 device=None,  # 自动选择
                 max_length=2048
             )
@@ -5751,8 +7375,8 @@ class KronosTradingGUI:
                 self.qwen_status_var.set("加载失败")
                 self.qwen_status_label.config(foreground="#e74c3c")
                 self._log_live_message("Qwen3模型加载失败: 模型未在本地缓存，请下载模型", "ERROR")
-                self._log_live_message(f"模型名称: Qwen/Qwen2.5-0.5B-Instruct", "INFO")
-                self._log_live_message(f"下载命令: pip install huggingface-hub && huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct", "INFO")
+                self._log_live_message(f"模型名称: Qwen/Qwen3.5-0.8B-Instruct", "INFO")
+                self._log_live_message(f"下载命令: pip install huggingface-hub && huggingface-cli download Qwen/Qwen3.5-0.8B-Instruct --local-dir models/Qwen3.5-0.8B-Instruct", "INFO")
                 
         except Exception as e:
             self.qwen_status_var.set("初始化失败")
@@ -6111,56 +7735,377 @@ class KronosTradingGUI:
         except Exception as e:
             self._log_live_message(f"获取策略推荐失败: {e}", "ERROR")
             return None
-
-    def _smart_strategy_generation(self):
-        """一键智能策略生成：自动初始化、分析市场、生成代码"""
+    
+    def _init_ai_scheduler(self):
+        """初始化AI策略中心调度器"""
         try:
-            self._log_live_message("=" * 60, "INFO")
-            self._log_live_message("🚀 开始智能策略生成流程", "INFO")
-            self._log_live_message("=" * 60, "INFO")
+            # 尝试导入调度器
+            from ai_strategy_scheduler import AIStrategyScheduler
+            from parameter_integrator import ParameterIntegrator
             
-            # 步骤1: 检查并初始化Qwen3
-            if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                self._log_live_message("步骤1: 初始化Qwen3优化器...", "INFO")
-                self._init_qwen3()
-                
-                # 检查初始化结果
-                if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                    self._log_live_message("❌ Qwen3初始化失败，无法继续", "ERROR")
-                    return
-                self._log_live_message("✓ Qwen3初始化成功", "SUCCESS")
-            else:
-                self._log_live_message("✓ Qwen3已初始化", "SUCCESS")
+            # 初始化参数集成器
+            self.parameter_integrator = ParameterIntegrator()
             
-            # 步骤2: 自动分析市场
-            self._log_live_message("\n步骤2: 分析当前市场状态...", "INFO")
-            self._auto_analyze_market_with_qwen()
+            # 初始化调度器
+            self.ai_scheduler = AIStrategyScheduler(
+                qwen_optimizer=self.qwen_optimizer,
+                parameter_integrator=self.parameter_integrator,
+                strategy_coordinator=self.strategy_coordinator,
+                check_interval_minutes=60
+            )
             
-            # 获取推荐结果
-            strategy_type_cn = self.qwen_strategy_type_var.get()
-            risk_profile_cn = self.qwen_risk_var.get()
+            # 设置回调
+            self.ai_scheduler.on_optimization_complete = self._on_optimization_complete
+            self.ai_scheduler.on_error = self._on_optimization_error
             
-            if strategy_type_cn == "自动选择":
-                self._log_live_message("⚠️ 策略类型为'自动选择'，使用默认策略", "WARNING")
-                strategy_type_cn = "趋势跟踪"
-                self.qwen_strategy_type_var.set(strategy_type_cn)
-            
-            self._log_live_message(f"✓ 市场分析完成", "SUCCESS")
-            self._log_live_message(f"  推荐策略: {strategy_type_cn}", "INFO")
-            self._log_live_message(f"  风险偏好: {risk_profile_cn}", "INFO")
-            
-            # 步骤3: 生成策略代码
-            self._log_live_message("\n步骤3: 生成策略代码...", "INFO")
-            self._generate_strategy_with_qwen()
-            
-            self._log_live_message("=" * 60, "INFO")
-            self._log_live_message("✅ 智能策略生成流程完成！", "SUCCESS")
-            self._log_live_message("=" * 60, "INFO")
-            self._log_live_message("💡 提示: 生成的策略代码已保存到项目目录", "INFO")
-            self._log_live_message("   您可以在专业策略中参考或集成生成的代码", "INFO")
+            print("✓ AI策略中心调度器初始化完成")
+            return True
             
         except Exception as e:
-            self._log_live_message(f"❌ 智能策略生成失败: {e}", "ERROR")
+            print(f"✗ AI策略中心调度器初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _start_ai_scheduler(self):
+        """启动AI策略中心调度器"""
+        try:
+            # 确保调度器已初始化
+            if not hasattr(self, "ai_scheduler") or self.ai_scheduler is None:
+                if not self._init_ai_scheduler():
+                    self._log_ai_strategy_message("❌ AI策略中心调度器初始化失败", "ERROR")
+                    return
+            
+            # 设置检查间隔
+            interval = self.optimization_interval_var.get()
+            self.ai_scheduler.check_interval_minutes = interval
+            
+            # 启动调度器
+            if self.ai_scheduler.start():
+                self.ai_scheduler_status_var.set("运行中")
+                self.start_scheduler_button.config(state=tk.DISABLED)
+                self.stop_scheduler_button.config(state=tk.NORMAL)
+                
+                # 更新状态标签颜色
+                for widget in self.ai_scheduler_status_var._root.winfo_children():
+                    if hasattr(widget, 'configure') and 'foreground' in widget.keys():
+                        widget.configure(foreground="#27ae60")
+                
+                self._log_ai_strategy_message(f"✅ AI策略中心调度器已启动 (检查间隔: {interval}分钟)", "SUCCESS")
+                self._log_ai_strategy_message("   📊 调度器将定期分析市场并自动优化交易参数", "INFO")
+            
+        except Exception as e:
+            self._log_ai_strategy_message(f"❌ 启动AI策略中心调度器失败: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+    
+    def _stop_ai_scheduler(self):
+        """停止AI策略中心调度器"""
+        try:
+            if hasattr(self, "ai_scheduler") and self.ai_scheduler:
+                if self.ai_scheduler.stop():
+                    self.ai_scheduler_status_var.set("已停止")
+                    self.start_scheduler_button.config(state=tk.NORMAL)
+                    self.stop_scheduler_button.config(state=tk.DISABLED)
+                    
+                    self._log_ai_strategy_message("⏹ AI策略中心调度器已停止", "WARNING")
+            
+        except Exception as e:
+            self._log_ai_strategy_message(f"❌ 停止AI策略中心调度器失败: {e}", "ERROR")
+    
+    def _open_strategy_config(self):
+        """打开策略参数配置对话框"""
+        try:
+            # 获取当前配置
+            current_config = self._get_current_strategy_config()
+            
+            # 打开对话框
+            dialog = StrategyConfigDialog(self.root, current_config)
+            result = dialog.show()
+            
+            if result is not None:
+                # 应用配置
+                self._apply_strategy_config(result)
+                self._log_ai_strategy_message("✅ 策略配置已应用", "SUCCESS")
+                messagebox.showinfo("成功", "策略配置已成功应用！")
+            
+        except Exception as e:
+            self._log_ai_strategy_message(f"❌ 打开配置对话框失败: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+    
+    def _get_current_strategy_config(self):
+        """获取当前策略配置"""
+        config = {
+            "coordinator": {},
+            "basic": {},
+            "entry": {},
+            "stop_loss": {},
+            "take_profit": {},
+            "risk": {},
+            "frequency": {},
+            "position": {}
+        }
+        
+        try:
+            # 从策略协调器获取配置
+            if hasattr(self, "strategy_coordinator") and self.strategy_coordinator:
+                coord_config = getattr(self.strategy_coordinator, "config", {})
+                config["coordinator"] = coord_config.copy()
+        except Exception:
+            pass
+        
+        try:
+            # 从strategy_config.py读取默认配置
+            from strategy_config import StrategyConfig
+            config["basic"] = {
+                "LEVERAGE": StrategyConfig.LEVERAGE,
+                "TREND_STRENGTH_THRESHOLD": StrategyConfig.TREND_STRENGTH_THRESHOLD,
+                "LOOKBACK_PERIOD": StrategyConfig.LOOKBACK_PERIOD,
+                "PREDICTION_LENGTH": StrategyConfig.PREDICTION_LENGTH,
+                "CHECK_INTERVAL": StrategyConfig.CHECK_INTERVAL
+            }
+            config["entry"] = StrategyConfig.ENTRY_FILTER.copy()
+            config["stop_loss"] = StrategyConfig.STOP_LOSS.copy()
+            config["take_profit"] = StrategyConfig.TAKE_PROFIT.copy()
+            config["risk"] = StrategyConfig.RISK_MANAGEMENT.copy()
+            config["frequency"] = StrategyConfig.TRADE_FREQUENCY.copy()
+            config["position"] = StrategyConfig.POSITION_MANAGEMENT.copy()
+        except Exception:
+            pass
+        
+        return config
+    
+    def _apply_strategy_config(self, config):
+        """应用策略配置"""
+        try:
+            # 更新策略协调器配置
+            if hasattr(self, "strategy_coordinator") and self.strategy_coordinator:
+                if "coordinator" in config:
+                    for key, value in config["coordinator"].items():
+                        if key in self.strategy_coordinator.config:
+                            self.strategy_coordinator.config[key] = value
+            
+            # 更新正在运行的策略实例
+            if hasattr(self, "strategy") and self.strategy:
+                if hasattr(self.strategy, "update_config"):
+                    success = self.strategy.update_config(config)
+                    if success:
+                        self._log_ai_strategy_message("✅ 策略实例配置已动态更新", "SUCCESS")
+            
+            # 更新strategy_config.py文件
+            self._update_strategy_config_file(config)
+            
+            self._log_ai_strategy_message("✅ 策略配置已更新", "SUCCESS")
+            
+        except Exception as e:
+            self._log_ai_strategy_message(f"❌ 应用配置失败: {e}", "ERROR")
+            raise
+    
+    def _update_strategy_config_file(self, config):
+        """更新strategy_config.py文件"""
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), "strategy_config.py")
+            
+            config_content = '''"""策略配置文件 - 由参数集成器自动生成"""
+
+class StrategyConfig:
+    SYMBOL = 'BTCUSDT'
+    TIMEFRAME = '5m'
+    LEVERAGE = {LEVERAGE}
+    TREND_STRENGTH_THRESHOLD = {TREND_STRENGTH_THRESHOLD}
+    LOOKBACK_PERIOD = {LOOKBACK_PERIOD}
+    PREDICTION_LENGTH = {PREDICTION_LENGTH}
+    CHECK_INTERVAL = {CHECK_INTERVAL}
+    ENTRY_FILTER = {{
+        "max_kline_change": {max_kline_change},
+        "max_funding_rate_long": {max_funding_rate_long},
+        "min_funding_rate_short": {min_funding_rate_short},
+        "support_buffer": {support_buffer},
+        "resistance_buffer": {resistance_buffer},
+    }}
+
+    STOP_LOSS = {{
+        "long_buffer": {long_buffer},
+        "short_buffer": {short_buffer},
+    }}
+
+    TAKE_PROFIT = {{
+        "tp1_multiplier_long": {tp1_multiplier_long},
+        "tp2_multiplier_long": {tp2_multiplier_long},
+        "tp3_multiplier_long": {tp3_multiplier_long},
+        "tp1_multiplier_short": {tp1_multiplier_short},
+        "tp2_multiplier_short": {tp2_multiplier_short},
+        "tp3_multiplier_short": {tp3_multiplier_short},
+        "tp1_position_ratio": {tp1_position_ratio},
+        "tp2_position_ratio": {tp2_position_ratio},
+        "tp3_position_ratio": {tp3_position_ratio},
+    }}
+
+    RISK_MANAGEMENT = {{
+        "single_trade_risk": {single_trade_risk},
+        "daily_loss_limit": {daily_loss_limit},
+        "max_consecutive_losses": {max_consecutive_losses},
+        "max_single_position": {max_single_position},
+        "max_daily_position": {max_daily_position},
+    }}
+
+    TRADE_FREQUENCY = {{
+        "max_daily_trades": {max_daily_trades},
+        "min_trade_interval_minutes": {min_trade_interval_minutes},
+        "active_hours_start": {active_hours_start},
+        "active_hours_end": {active_hours_end},
+    }}
+
+    POSITION_MANAGEMENT = {{
+        "initial_entry_ratio": {initial_entry_ratio},
+        "confirm_interval_kline": {confirm_interval_kline},
+        "add_on_profit": {add_on_profit},
+        "add_ratio": {add_ratio},
+        "max_add_times": {max_add_times},
+    }}
+
+    STRATEGY_CONFIG = {{
+        "entry_confirm_count": {entry_confirm_count},
+        "reverse_confirm_count": {reverse_confirm_count},
+        "require_consecutive_prediction": {require_consecutive_prediction},
+        "post_entry_hours": {post_entry_hours},
+        "take_profit_min_pct": {take_profit_min_pct},
+    }}
+'''
+            
+            # 填充配置值
+            basic = config.get("basic", {})
+            entry = config.get("entry", {})
+            stop_loss = config.get("stop_loss", {})
+            take_profit = config.get("take_profit", {})
+            risk = config.get("risk", {})
+            frequency = config.get("frequency", {})
+            position = config.get("position", {})
+            strategy = config.get("strategy", {})
+            
+            config_content = config_content.format(
+                LEVERAGE=basic.get("LEVERAGE", 10),
+                TREND_STRENGTH_THRESHOLD=basic.get("TREND_STRENGTH_THRESHOLD", 0.0047),
+                LOOKBACK_PERIOD=basic.get("LOOKBACK_PERIOD", 91),
+                PREDICTION_LENGTH=basic.get("PREDICTION_LENGTH", 90),
+                CHECK_INTERVAL=basic.get("CHECK_INTERVAL", 180),
+                max_kline_change=entry.get("max_kline_change", 0.015),
+                max_funding_rate_long=entry.get("max_funding_rate_long", 0.03),
+                min_funding_rate_short=entry.get("min_funding_rate_short", -0.03),
+                support_buffer=entry.get("support_buffer", 1.001),
+                resistance_buffer=entry.get("resistance_buffer", 0.999),
+                long_buffer=stop_loss.get("long_buffer", 0.996),
+                short_buffer=stop_loss.get("short_buffer", 1.004),
+                tp1_multiplier_long=take_profit.get("tp1_multiplier_long", 1.025),
+                tp2_multiplier_long=take_profit.get("tp2_multiplier_long", 1.05),
+                tp3_multiplier_long=take_profit.get("tp3_multiplier_long", 1.14),
+                tp1_multiplier_short=take_profit.get("tp1_multiplier_short", 0.975),
+                tp2_multiplier_short=take_profit.get("tp2_multiplier_short", 0.95),
+                tp3_multiplier_short=take_profit.get("tp3_multiplier_short", 0.86),
+                tp1_position_ratio=take_profit.get("tp1_position_ratio", 0.35),
+                tp2_position_ratio=take_profit.get("tp2_position_ratio", 0.35),
+                tp3_position_ratio=take_profit.get("tp3_position_ratio", 0.30),
+                single_trade_risk=risk.get("single_trade_risk", 0.029),
+                daily_loss_limit=risk.get("daily_loss_limit", 0.12),
+                max_consecutive_losses=risk.get("max_consecutive_losses", 6),
+                max_single_position=risk.get("max_single_position", 0.29),
+                max_daily_position=risk.get("max_daily_position", 0.85),
+                max_daily_trades=frequency.get("max_daily_trades", 55),
+                min_trade_interval_minutes=frequency.get("min_trade_interval_minutes", 3),
+                active_hours_start=frequency.get("active_hours_start", 0),
+                active_hours_end=frequency.get("active_hours_end", 24),
+                initial_entry_ratio=position.get("initial_entry_ratio", 0.35),
+                confirm_interval_kline=position.get("confirm_interval_kline", 2),
+                add_on_profit=position.get("add_on_profit", True),
+                add_ratio=position.get("add_ratio", 0.25),
+                max_add_times=position.get("max_add_times", 3),
+                entry_confirm_count=strategy.get("entry_confirm_count", 3),
+                reverse_confirm_count=strategy.get("reverse_confirm_count", 2),
+                require_consecutive_prediction=strategy.get("require_consecutive_prediction", 2),
+                post_entry_hours=strategy.get("post_entry_hours", 6),
+                take_profit_min_pct=strategy.get("take_profit_min_pct", 0.5)
+            )
+            
+            # 写入文件
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(config_content)
+            
+        except Exception as e:
+            print(f"更新配置文件失败: {e}")
+            raise
+    
+    def _trigger_optimization_now(self):
+        """立即触发一次优化"""
+        try:
+            # 确保调度器已初始化
+            if not hasattr(self, "ai_scheduler") or self.ai_scheduler is None:
+                if not self._init_ai_scheduler():
+                    self._log_ai_strategy_message("❌ AI策略中心调度器初始化失败", "ERROR")
+                    return
+            
+            self._log_ai_strategy_message("⚡ 触发立即优化...", "INFO")
+            
+            if self.ai_scheduler.trigger_optimization_now():
+                self._log_ai_strategy_message("✓ 优化任务已提交", "SUCCESS")
+            else:
+                self._log_ai_strategy_message("⚠️ 请先启动调度器", "WARNING")
+            
+        except Exception as e:
+            self._log_ai_strategy_message(f"❌ 触发优化失败: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+    
+    def _on_optimization_complete(self, record: Dict):
+        """优化完成回调"""
+        try:
+            timestamp = record.get("timestamp", "")
+            dt = datetime.fromisoformat(timestamp)
+            
+            # 更新上次优化时间
+            self.last_optimization_var.set(dt.strftime("%H:%M:%S"))
+            
+            # 添加到历史记录
+            self._add_optimization_history(record)
+            
+            # 记录日志
+            self._log_ai_strategy_message(f"✅ 优化完成: {dt.strftime('%Y-%m-%d %H:%M:%S')}", "SUCCESS")
+            
+        except Exception as e:
+            print(f"优化完成回调错误: {e}")
+    
+    def _on_optimization_error(self, error: Exception):
+        """优化错误回调"""
+        try:
+            self._log_ai_strategy_message(f"❌ 优化错误: {error}", "ERROR")
+        except Exception as e:
+            print(f"优化错误回调错误: {e}")
+    
+    def _add_optimization_history(self, record: Dict):
+        """添加优化历史记录"""
+        try:
+            timestamp = record.get("timestamp", "")
+            dt = datetime.fromisoformat(timestamp)
+            time_str = dt.strftime("%H:%M:%S")
+            
+            params = record.get("optimized_parameters", {})
+            
+            history_entry = f"[{time_str}] 优化完成\n"
+            
+            if "market_analysis" in params:
+                history_entry += f"  市场分析: {params['market_analysis']}\n"
+            
+            if "optimization_reasoning" in params:
+                history_entry += f"  优化理由: {params['optimization_reasoning']}\n"
+            
+            history_entry += "-" * 50 + "\n"
+            
+            # 添加到文本框
+            self.optimization_history_text.insert(tk.END, history_entry)
+            self.optimization_history_text.see(tk.END)
+            
+        except Exception as e:
+            print(f"添加优化历史错误: {e}")
 
     def _initialize_auto_optimization_system(self):
         """初始化自动化优化系统"""
@@ -6521,20 +8466,23 @@ class KronosTradingGUI:
         except Exception as e:
             print(f"记录AI策略中心消息失败: {e}")
 
-    def _update_confirm_counts(self):
+    def _update_confirm_counts_display(self):
         """更新确认次数显示（Spinbox值改变时调用）"""
         try:
             entry_count = self.entry_confirm_count_var.get()
             reverse_count = self.reverse_confirm_count_var.get()
+            consecutive_pred = self.require_consecutive_prediction_var.get()
+            post_entry_hours = self.post_entry_hours_var.get()
+            take_profit_min_pct = self.take_profit_min_pct_var.get()
             
             # 这里可以添加实时显示更新逻辑
             # 暂时只记录日志
             self._log_ai_strategy_message(
-                f"确认次数设置: 开仓{entry_count}次, 平仓{reverse_count}次", 
+                f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                 "INFO"
             )
         except Exception as e:
-            self._log_ai_strategy_message(f"更新确认次数显示失败: {e}", "ERROR")
+            self._log_ai_strategy_message(f"更新参数显示失败: {e}", "ERROR")
 
     def _apply_confirm_counts(self):
         """应用确认次数设置到策略实例"""
@@ -6542,6 +8490,9 @@ class KronosTradingGUI:
             # 获取Spinbox的值
             entry_count = int(self.entry_confirm_count_var.get())
             reverse_count = int(self.reverse_confirm_count_var.get())
+            consecutive_pred = int(self.require_consecutive_prediction_var.get())
+            post_entry_hours = float(self.post_entry_hours_var.get())
+            take_profit_min_pct = float(self.take_profit_min_pct_var.get())
             
             # 验证范围
             if not (1 <= entry_count <= 10):
@@ -6550,17 +8501,30 @@ class KronosTradingGUI:
             if not (1 <= reverse_count <= 10):
                 self._log_ai_strategy_message(f"平仓确认次数超出范围: {reverse_count} (1-10)", "ERROR")
                 return
+            if not (1 <= consecutive_pred <= 10):
+                self._log_ai_strategy_message(f"连续预测确认次数超出范围: {consecutive_pred} (1-10)", "ERROR")
+                return
+            if not (0.5 <= post_entry_hours <= 24):
+                self._log_ai_strategy_message(f"开仓后计时超出范围: {post_entry_hours} (0.5-24)", "ERROR")
+                return
+            if not (0.1 <= take_profit_min_pct <= 10):
+                self._log_ai_strategy_message(f"最小止盈比例超出范围: {take_profit_min_pct} (0.1-10)", "ERROR")
+                return
             
             # 更新策略实例（如果存在）
             if hasattr(self, 'strategy') and self.strategy is not None:
                 self.strategy.entry_confirm_count = entry_count
                 self.strategy.reverse_confirm_count = reverse_count
+                self.strategy.require_consecutive_prediction = consecutive_pred
+                self.strategy.post_entry_hours = post_entry_hours
+                self.strategy.take_profit_min_pct = take_profit_min_pct
                 self.strategy.consecutive_entry_count = 0  # 重置计数器
                 self.strategy.consecutive_reverse_count = 0  # 重置计数器
                 self.strategy.last_entry_signal = None  # 重置信号
+                self.strategy.last_reverse_signal = None  # 重置信号
                 
                 self._log_ai_strategy_message(
-                    f"✅ 确认次数已应用到当前策略: 开仓{entry_count}次, 平仓{reverse_count}次", 
+                    f"✅ 参数已应用到当前策略: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                     "SUCCESS"
                 )
                 self._log_ai_strategy_message(
@@ -6569,7 +8533,7 @@ class KronosTradingGUI:
                 )
             else:
                 self._log_ai_strategy_message(
-                    f"✅ 确认次数已保存: 开仓{entry_count}次, 平仓{reverse_count}次", 
+                    f"✅ 参数已保存: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                     "SUCCESS"
                 )
                 self._log_ai_strategy_message(
@@ -6578,14 +8542,14 @@ class KronosTradingGUI:
                 )
             
             # 保存设置到配置文件
-            self._save_confirm_counts_settings(entry_count, reverse_count)
+            self._save_confirm_counts_settings(entry_count, reverse_count, consecutive_pred, post_entry_hours, take_profit_min_pct)
             
         except ValueError as e:
             self._log_ai_strategy_message(f"数值转换失败: {e} (请输入1-10的整数)", "ERROR")
         except Exception as e:
             self._log_ai_strategy_message(f"应用确认次数失败: {e}", "ERROR")
 
-    def _save_confirm_counts_settings(self, entry_count, reverse_count):
+    def _save_confirm_counts_settings(self, entry_count, reverse_count, consecutive_pred, post_entry_hours, take_profit_min_pct):
         """保存确认次数设置到配置文件"""
         try:
             settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_settings.json")
@@ -6602,6 +8566,9 @@ class KronosTradingGUI:
             
             settings['confirm_counts']['entry_confirm_count'] = entry_count
             settings['confirm_counts']['reverse_confirm_count'] = reverse_count
+            settings['confirm_counts']['require_consecutive_prediction'] = consecutive_pred
+            settings['confirm_counts']['post_entry_hours'] = post_entry_hours
+            settings['confirm_counts']['take_profit_min_pct'] = take_profit_min_pct
             settings['confirm_counts']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 保存设置
@@ -6626,12 +8593,18 @@ class KronosTradingGUI:
                     confirm_counts = settings['confirm_counts']
                     entry_count = confirm_counts.get('entry_confirm_count', 2)
                     reverse_count = confirm_counts.get('reverse_confirm_count', 2)
+                    consecutive_pred = confirm_counts.get('require_consecutive_prediction', 3)
+                    post_entry_hours = confirm_counts.get('post_entry_hours', 2.0)
+                    take_profit_min_pct = confirm_counts.get('take_profit_min_pct', 0.6)
                     
                     self.entry_confirm_count_var.set(str(entry_count))
                     self.reverse_confirm_count_var.set(str(reverse_count))
+                    self.require_consecutive_prediction_var.set(str(consecutive_pred))
+                    self.post_entry_hours_var.set(str(post_entry_hours))
+                    self.take_profit_min_pct_var.set(str(take_profit_min_pct))
                     
                     self._log_ai_strategy_message(
-                        f"已加载确认次数设置: 开仓{entry_count}次, 平仓{reverse_count}次", 
+                        f"已加载参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                         "INFO"
                     )
                     return True
@@ -6641,6 +8614,800 @@ class KronosTradingGUI:
         except Exception as e:
             self._log_ai_strategy_message(f"加载设置失败: {e}", "WARNING")
             return False
+
+    def _create_main_backtest_tab(self, parent):
+        """创建主回测标签页"""
+        frame = ttk.Frame(parent, padding="15")
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 标题
+        title_label = ttk.Label(
+            frame,
+            text="📊 策略回测系统",
+            font=("微软雅黑", 16, "bold"),
+            foreground="#2c3e50"
+        )
+        title_label.pack(pady=(0, 15))
+        
+        # 回测参数配置区域
+        config_frame = ttk.LabelFrame(frame, text="⚙️ 回测参数配置", padding="12")
+        config_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # 数据文件选择
+        load_row = ttk.Frame(config_frame)
+        load_row.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(load_row, text="历史数据文件:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_data_file_var = tk.StringVar(value="")
+        data_file_entry = ttk.Entry(load_row, textvariable=self.backtest_data_file_var, width=50)
+        data_file_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(load_row, text="📂 选择文件", command=self._select_backtest_data_file).pack(side=tk.LEFT, padx=5)
+        ttk.Button(load_row, text="📋 刷新列表", command=self._refresh_backtest_data_list).pack(side=tk.LEFT, padx=5)
+        
+        # 时间范围选择
+        time_range_frame = ttk.LabelFrame(config_frame, text="📅 数据抓取时间范围", padding="10")
+        time_range_frame.pack(fill=tk.X, pady=10)
+        
+        # 开始时间
+        start_time_row = ttk.Frame(time_range_frame)
+        start_time_row.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(start_time_row, text="开始时间:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_start_year_var = tk.StringVar(value="")
+        self.backtest_start_month_var = tk.StringVar(value="")
+        self.backtest_start_day_var = tk.StringVar(value="")
+        
+        ttk.Label(start_time_row, text="年:").pack(side=tk.LEFT, padx=(10, 0))
+        year_values = [str(y) for y in range(2020, 2027)]
+        start_year_combobox = ttk.Combobox(start_time_row, textvariable=self.backtest_start_year_var, values=year_values, width=6, state="readonly")
+        start_year_combobox.pack(side=tk.LEFT)
+        
+        ttk.Label(start_time_row, text="月:").pack(side=tk.LEFT, padx=(10, 0))
+        month_values = [f"{m:02d}" for m in range(1, 13)]
+        start_month_combobox = ttk.Combobox(start_time_row, textvariable=self.backtest_start_month_var, values=month_values, width=4, state="readonly")
+        start_month_combobox.pack(side=tk.LEFT)
+        
+        ttk.Label(start_time_row, text="日:").pack(side=tk.LEFT, padx=(10, 0))
+        day_values = [f"{d:02d}" for d in range(1, 32)]
+        start_day_combobox = ttk.Combobox(start_time_row, textvariable=self.backtest_start_day_var, values=day_values, width=4, state="readonly")
+        start_day_combobox.pack(side=tk.LEFT)
+        
+        # 结束时间
+        end_time_row = ttk.Frame(time_range_frame)
+        end_time_row.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(end_time_row, text="结束时间:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_end_year_var = tk.StringVar(value="")
+        self.backtest_end_month_var = tk.StringVar(value="")
+        self.backtest_end_day_var = tk.StringVar(value="")
+        
+        ttk.Label(end_time_row, text="年:").pack(side=tk.LEFT, padx=(10, 0))
+        end_year_combobox = ttk.Combobox(end_time_row, textvariable=self.backtest_end_year_var, values=year_values, width=6, state="readonly")
+        end_year_combobox.pack(side=tk.LEFT)
+        
+        ttk.Label(end_time_row, text="月:").pack(side=tk.LEFT, padx=(10, 0))
+        end_month_combobox = ttk.Combobox(end_time_row, textvariable=self.backtest_end_month_var, values=month_values, width=4, state="readonly")
+        end_month_combobox.pack(side=tk.LEFT)
+        
+        ttk.Label(end_time_row, text="日:").pack(side=tk.LEFT, padx=(10, 0))
+        end_day_combobox = ttk.Combobox(end_time_row, textvariable=self.backtest_end_day_var, values=day_values, width=4, state="readonly")
+        end_day_combobox.pack(side=tk.LEFT)
+        
+        # 设置默认时间（最近30天）
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        thirty_days_ago = today - timedelta(days=30)
+        self.backtest_start_year_var.set(str(thirty_days_ago.year))
+        self.backtest_start_month_var.set(f"{thirty_days_ago.month:02d}")
+        self.backtest_start_day_var.set(f"{thirty_days_ago.day:02d}")
+        self.backtest_end_year_var.set(str(today.year))
+        self.backtest_end_month_var.set(f"{today.month:02d}")
+        self.backtest_end_day_var.set(f"{today.day:02d}")
+        
+        # 参数行2：初始资金
+        config_row2 = ttk.Frame(config_frame)
+        config_row2.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(config_row2, text="初始资金(USDT):", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_capital_var = tk.StringVar(value="10000")
+        capital_entry = ttk.Entry(config_row2, textvariable=self.backtest_capital_var, width=15)
+        capital_entry.pack(side=tk.LEFT, padx=5)
+        
+        # 参数行3：手续费率
+        config_row3 = ttk.Frame(config_frame)
+        config_row3.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(config_row3, text="手续费率(%):", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_fee_var = tk.StringVar(value="0.1")
+        fee_spinbox = ttk.Spinbox(config_row3, from_=0, to=1, increment=0.01, textvariable=self.backtest_fee_var, width=12)
+        fee_spinbox.pack(side=tk.LEFT, padx=5)
+        
+        # 参数行4：滑点
+        config_row4 = ttk.Frame(config_frame)
+        config_row4.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(config_row4, text="滑点(%):", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.backtest_slippage_var = tk.StringVar(value="0.05")
+        slippage_spinbox = ttk.Spinbox(config_row4, from_=0, to=1, increment=0.01, textvariable=self.backtest_slippage_var, width=12)
+        slippage_spinbox.pack(side=tk.LEFT, padx=5)
+        
+        # 操作按钮区
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.run_backtest_btn = ttk.Button(
+            button_frame,
+            text="▶️ 开始回测",
+            command=self._run_backtest,
+            style="Accent.TButton",
+            width=20
+        )
+        self.run_backtest_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.stop_backtest_btn = ttk.Button(
+            button_frame,
+            text="⏹️ 停止回测",
+            command=self._stop_backtest,
+            style="Accent.TButton",
+            width=20,
+            state="disabled"
+        )
+        self.stop_backtest_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame,
+            text="📥 抓取储存数据",
+            command=self._download_historical_data,
+            width=18
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame,
+            text="📋 导出结果",
+            command=self._export_backtest_results,
+            width=15
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame,
+            text="🗑️ 清空结果",
+            command=self._clear_backtest_results,
+            width=15
+        ).pack(side=tk.LEFT)
+        
+        # 进度条
+        progress_frame = ttk.Frame(frame)
+        progress_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(progress_frame, text="回测进度:").pack(side=tk.LEFT, padx=(0, 10))
+        self.backtest_progress = ttk.Progressbar(progress_frame, mode="determinate", length=400, style="green.Horizontal.TProgressbar")
+        self.backtest_progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.backtest_progress_label = ttk.Label(progress_frame, text="0%", width=6)
+        self.backtest_progress_label.pack(side=tk.LEFT, padx=10)
+        
+        # 回测结果统计区
+        stats_frame = ttk.LabelFrame(frame, text="📈 回测结果统计", padding="12")
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # 统计行1
+        stats_row1 = ttk.Frame(stats_frame)
+        stats_row1.pack(fill=tk.X, pady=5)
+        
+        self.backtest_total_return_var = tk.StringVar(value="-")
+        self.backtest_win_rate_var = tk.StringVar(value="-")
+        self.backtest_profit_factor_var = tk.StringVar(value="-")
+        self.backtest_max_drawdown_var = tk.StringVar(value="-")
+        
+        self._create_stat_item(stats_row1, "总收益率", self.backtest_total_return_var, "#27ae60")
+        self._create_stat_item(stats_row1, "胜率", self.backtest_win_rate_var, "#3498db")
+        self._create_stat_item(stats_row1, "盈亏比", self.backtest_profit_factor_var, "#9b59b6")
+        self._create_stat_item(stats_row1, "最大回撤", self.backtest_max_drawdown_var, "#e74c3c")
+        
+        # 统计行2
+        stats_row2 = ttk.Frame(stats_frame)
+        stats_row2.pack(fill=tk.X, pady=5)
+        
+        self.backtest_total_trades_var = tk.StringVar(value="-")
+        self.backtest_win_trades_var = tk.StringVar(value="-")
+        self.backtest_loss_trades_var = tk.StringVar(value="-")
+        self.backtest_avg_profit_var = tk.StringVar(value="-")
+        
+        self._create_stat_item(stats_row2, "总交易次数", self.backtest_total_trades_var, "#2c3e50")
+        self._create_stat_item(stats_row2, "盈利次数", self.backtest_win_trades_var, "#27ae60")
+        self._create_stat_item(stats_row2, "亏损次数", self.backtest_loss_trades_var, "#e74c3c")
+        self._create_stat_item(stats_row2, "平均盈利", self.backtest_avg_profit_var, "#f39c12")
+        
+        # 回测交易日志区
+        log_frame = ttk.LabelFrame(frame, text="📝 交易记录", padding="12")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.backtest_log_text = tk.Text(
+            log_frame,
+            height=12,
+            font=("Consolas", 11),
+            bg="#f8f9fa",
+            relief=tk.FLAT,
+            wrap=tk.WORD
+        )
+        
+        # 传统滚动条（更宽更明显）
+        log_scrollbar = tk.Scrollbar(
+            log_frame, 
+            orient=tk.VERTICAL, 
+            command=self.backtest_log_text.yview,
+            width=25,
+            relief=tk.SUNKEN,
+            bg="#d3d3d3",
+            activebackground="#a9a9a9"
+        )
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.backtest_log_text.configure(yscrollcommand=log_scrollbar.set)
+        
+        # 布局
+        self.backtest_log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    
+    def _create_stat_item(self, parent, label_text, var, color):
+        """创建统计项组件"""
+        item_frame = ttk.Frame(parent)
+        item_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        ttk.Label(item_frame, text=label_text, font=("微软雅黑", 9), foreground="#7f8c8d").pack(anchor=tk.W)
+        ttk.Label(item_frame, textvariable=var, font=("微软雅黑", 14, "bold"), foreground=color).pack(anchor=tk.W)
+    
+    def _run_backtest(self):
+        """运行回测"""
+        import threading
+        self.run_backtest_btn.config(state="disabled")
+        self.stop_backtest_btn.config(state="normal")
+        self.backtest_progress["value"] = 0
+        self.backtest_progress_label.config(text="0%")
+        
+        try:
+            data_file_path = self.backtest_data_file_var.get().strip()
+            if not data_file_path:
+                messagebox.showwarning("警告", "请先选择历史数据文件！")
+                self.run_backtest_btn.config(state="normal")
+                self.stop_backtest_btn.config(state="disabled")
+                return
+            
+            capital = float(self.backtest_capital_var.get())
+            fee_rate = float(self.backtest_fee_var.get()) / 100
+            slippage = float(self.backtest_slippage_var.get()) / 100
+            
+            self.backtest_log_text.insert(tk.END, f"[开始回测] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self.backtest_log_text.insert(tk.END, f"数据获取方式: 载入历史数据\n")
+            self.backtest_log_text.insert(tk.END, f"数据文件: {data_file_path}\n")
+            self.backtest_log_text.insert(tk.END, f"参数: 资金=${capital:.2f}, 手续费={fee_rate*100:.2f}%, 滑点={slippage*100:.2f}%\n")
+            
+            self.backtest_log_text.insert(tk.END, "="*80 + "\n")
+            
+            import threading
+            self.backtest_stop_event = threading.Event()
+            self.backtest_stop_event.clear()
+            
+            backtest_thread = threading.Thread(
+                target=self._simulate_backtest,
+                args=(capital, fee_rate, slippage, data_file_path)
+            )
+            backtest_thread.daemon = True
+            backtest_thread.start()
+            
+        except Exception as e:
+            self.backtest_log_text.insert(tk.END, f"[错误] {e}\n")
+            import traceback
+            traceback.print_exc()
+            self.run_backtest_btn.config(state="normal")
+            self.stop_backtest_btn.config(state="disabled")
+    
+    def _simulate_backtest(self, initial_capital, fee_rate, slippage, data_file_path):
+        """模拟回测核心逻辑 - 使用真实策略回测"""
+        from datetime import datetime, timedelta
+        from binance_api import BinanceAPI
+        from professional_strategy import ProfessionalTradingStrategy
+        import pandas as pd
+        import os
+        
+        self.backtest_log_text.insert(tk.END, "获取历史数据...\n")
+        self._update_progress(10)
+        if hasattr(self, "backtest_logger"):
+            self.backtest_logger.info("获取历史数据...")
+        
+        df = None
+        
+        self.backtest_log_text.insert(tk.END, "[载入数据] 正在从文件加载数据...\n")
+        try:
+            if not os.path.exists(data_file_path):
+                self.backtest_log_text.insert(tk.END, f"[错误] 文件不存在: {data_file_path}\n")
+                self._update_progress(100)
+                self.run_backtest_btn.config(state="normal")
+                self.stop_backtest_btn.config(state="disabled")
+                return
+            
+            df = pd.read_csv(data_file_path, encoding='utf-8')
+            self.backtest_log_text.insert(tk.END, f"[载入数据] 成功加载 {len(df)} 条数据\n")
+            if len(df) > 0 and 'timestamps' in df.columns:
+                self.backtest_log_text.insert(tk.END, f"[数据] 最早时间: {df['timestamps'].iloc[0]}\n")
+                self.backtest_log_text.insert(tk.END, f"[数据] 最晚时间: {df['timestamps'].iloc[-1]}\n")
+        except Exception as e:
+            self.backtest_log_text.insert(tk.END, f"[错误] 载入数据失败: {e}\n")
+            import traceback
+            self.backtest_log_text.insert(tk.END, f"{traceback.format_exc()}\n")
+            self._update_progress(100)
+            self.run_backtest_btn.config(state="normal")
+            self.stop_backtest_btn.config(state="disabled")
+            return
+        
+        if df is None or len(df) < 100:
+            self.backtest_log_text.insert(tk.END, f"K线数据不足，无法回测 (df={df is not None}, len={len(df) if df is not None else 0})\n")
+            self.backtest_log_text.insert(tk.END, f"[错误] K线数据不足，至少需要100条 (当前: {len(df) if df is not None else 0})\n")
+            self._update_progress(100)
+            self.run_backtest_btn.config(state="normal")
+            self.stop_backtest_btn.config(state="disabled")
+            return
+        
+        self.backtest_log_text.insert(tk.END, f"成功获取 {len(df)} 条K线数据\n")
+        self.backtest_log_text.insert(tk.END, f"[数据] 获取到 {len(df)} 条K线数据\n")
+        if hasattr(self, "backtest_logger"):
+            self.backtest_logger.info(f"成功获取 {len(df)} 条K线数据")
+        
+        self.backtest_log_text.insert(tk.END, "="*80 + "\n")
+        self.backtest_log_text.insert(tk.END, "[开始回测] 正在运行策略回测...\n")
+        
+        self._update_progress(20)
+        self.backtest_log_text.insert(tk.END, "开始运行策略回测...\n")
+        if hasattr(self, "backtest_logger"):
+            self.backtest_logger.info("[开始回测] 正在运行策略回测...")
+        
+        def progress_callback(value):
+            self._update_progress(20 + int(value * 0.7))
+        
+        def log_callback(msg):
+            self.backtest_log_text.insert(tk.END, f"{msg}\n")
+            if hasattr(self, "backtest_logger"):
+                self.backtest_logger.info(msg)
+            scroll_position = self.backtest_log_text.yview()
+            if scroll_position[1] >= 0.99:
+                self.backtest_log_text.see(tk.END)
+        
+        if not hasattr(self, 'strategy') or not self.strategy:
+            self.backtest_log_text.insert(tk.END, "[策略创建] 策略不存在，正在创建...\n")
+            symbol = self.symbol_var.get()
+            model_name = self.model_var.get()
+            timeframe = self.timeframe_var.get()
+            leverage = int(self.leverage_var.get())
+            interval = int(self.interval_var.get())
+            min_position = float(self.min_position_var.get())
+            ai_min_trend = float(self.ai_min_trend_var.get())
+            ai_min_deviation = float(self.ai_min_deviation_var.get())
+            max_funding = float(self.max_funding_var.get())
+            min_funding = float(self.min_funding_var.get())
+            
+            strategy_map = {
+                "趋势爆发": "trend",
+                "震荡套利": "range",
+                "消息突破": "breakout",
+                "自动策略": "auto",
+                "时间策略": "time",
+            }
+            strategy_type = strategy_map.get(self.strategy_var.get(), "trend")
+            
+            BinanceAPI()
+            
+            def analysis_callback(history_timestamps=None, history_prices=None, 
+                                  pred_timestamps=None, pred_prices=None,
+                                  trend_direction='NEUTRAL', trend_strength=0, 
+                                  pred_change=0, threshold=0.008):
+                pass
+            
+            self.strategy = ProfessionalTradingStrategy(
+                symbol=symbol,
+                leverage=leverage,
+                interval=interval,
+                model_name=model_name,
+                timeframe=timeframe,
+                threshold=float(self.threshold_var.get()),
+                strategy_type=strategy_type,
+                min_position=min_position,
+                ai_min_trend=ai_min_trend,
+                ai_min_deviation=ai_min_deviation,
+                max_funding=max_funding,
+                min_funding=min_funding,
+                analysis_callback=analysis_callback
+            )
+            
+            try:
+                config = self._get_ai_strategy_config_from_ui()
+                self._apply_strategy_config(config)
+                
+                self.backtest_log_text.insert(tk.END, f"[策略创建] 参数设置完成\n")
+                if hasattr(self, "backtest_logger"):
+                    self.backtest_logger.info(f"[策略创建] 参数设置完成")
+            except Exception as e:
+                self.backtest_log_text.insert(tk.END, f"[策略创建] 参数设置失败: {e}\n")
+                if hasattr(self, "backtest_logger"):
+                    self.backtest_logger.error(f"[策略创建] 参数设置失败: {e}")
+            
+            self.backtest_log_text.insert(tk.END, "[策略创建] 策略创建成功！\n")
+            if hasattr(self, "backtest_logger"):
+                self.backtest_logger.info("[策略创建] 策略创建成功！")
+        
+        try:
+            results = self.strategy.run_backtest(
+                df_historical=df,
+                initial_capital=initial_capital,
+                fee_rate=fee_rate,
+                slippage=slippage,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+                stop_event=self.backtest_stop_event
+            )
+            
+            self._update_progress(100)
+            self._display_real_backtest_results(results)
+            self.backtest_log_text.insert(tk.END, "回测完成！\n")
+            if hasattr(self, "backtest_logger"):
+                self.backtest_logger.info("回测完成！")
+            
+        except Exception as e:
+            self.backtest_log_text.insert(tk.END, f"[错误] 回测执行失败: {e}\n")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.run_backtest_btn.config(state="normal")
+            self.stop_backtest_btn.config(state="disabled")
+    
+    def _display_real_backtest_results(self, results):
+        """显示真实回测结果"""
+        total_return = results['total_return']
+        win_rate = results['win_rate']
+        profit_factor = results['profit_factor']
+        max_drawdown = results['max_drawdown']
+        total_trades = results['total_trades']
+        win_trades = results['win_trades']
+        loss_trades = results['loss_trades']
+        avg_profit = results['avg_profit']
+        
+        self.backtest_total_return_var.set(f"{total_return:+.2%}")
+        self.backtest_win_rate_var.set(f"{win_rate:.2%}")
+        self.backtest_profit_factor_var.set(f"{profit_factor:.2f}")
+        self.backtest_max_drawdown_var.set(f"{-max_drawdown:.2%}")
+        self.backtest_total_trades_var.set(f"{total_trades}")
+        self.backtest_win_trades_var.set(f"{win_trades}")
+        self.backtest_loss_trades_var.set(f"{loss_trades}")
+        self.backtest_avg_profit_var.set(f"{avg_profit:+.2f}%")
+        
+        self.backtest_log_text.insert(tk.END, "="*80 + "\n")
+        self.backtest_log_text.insert(tk.END, "📊 回测结果统计\n")
+        self.backtest_log_text.insert(tk.END, "="*80 + "\n")
+        self.backtest_log_text.insert(tk.END, f"初始资金: ${results['initial_capital']:.2f}\n")
+        self.backtest_log_text.insert(tk.END, f"最终资金: ${results['final_capital']:.2f}\n")
+        self.backtest_log_text.insert(tk.END, f"总收益率: {total_return:+.2%}\n")
+        self.backtest_log_text.insert(tk.END, f"胜率: {win_rate:.2%}\n")
+        self.backtest_log_text.insert(tk.END, f"盈亏比: {profit_factor:.2f}\n")
+        self.backtest_log_text.insert(tk.END, f"最大回撤: {-max_drawdown:.2%}\n")
+        self.backtest_log_text.insert(tk.END, f"总交易次数: {total_trades}\n")
+        self.backtest_log_text.insert(tk.END, f"盈利次数: {win_trades}\n")
+        self.backtest_log_text.insert(tk.END, f"亏损次数: {loss_trades}\n")
+        self.backtest_log_text.insert(tk.END, f"平均盈利: {avg_profit:+.2f}%\n")
+        self.backtest_log_text.insert(tk.END, f"总手续费: ${results['total_fees']:.2f}\n")
+        
+        # 同时记录到回测日志文件
+        if hasattr(self, "backtest_logger"):
+            self.backtest_logger.info("="*80)
+            self.backtest_logger.info("📊 回测结果统计")
+            self.backtest_logger.info("="*80)
+            self.backtest_logger.info(f"初始资金: ${results['initial_capital']:.2f}")
+            self.backtest_logger.info(f"最终资金: ${results['final_capital']:.2f}")
+            self.backtest_logger.info(f"总收益率: {total_return:+.2%}")
+            self.backtest_logger.info(f"胜率: {win_rate:.2%}")
+            self.backtest_logger.info(f"盈亏比: {profit_factor:.2f}")
+            self.backtest_logger.info(f"最大回撤: {-max_drawdown:.2%}")
+            self.backtest_logger.info(f"总交易次数: {total_trades}")
+            self.backtest_logger.info(f"盈利次数: {win_trades}")
+            self.backtest_logger.info(f"亏损次数: {loss_trades}")
+            self.backtest_logger.info(f"平均盈利: {avg_profit:+.2f}%")
+            self.backtest_logger.info(f"总手续费: ${results['total_fees']:.2f}")
+        
+        self.backtest_log_text.insert(tk.END, "="*80 + "\n\n")
+        
+        self.backtest_log_text.insert(tk.END, "[详细交易记录]\n")
+        for i, trade in enumerate(results['trades'][:50], 1):
+            if trade['type'] == 'OPEN':
+                self.backtest_log_text.insert(tk.END, f"{i}. [开仓] {trade['time']} - {trade['direction']} - 价格: {trade['price']:.2f} - 数量: {trade['size']:.4f}\n")
+                if hasattr(self, "backtest_logger"):
+                    self.backtest_logger.info(f"{i}. [开仓] {trade['time']} - {trade['direction']} - 价格: {trade['price']:.2f} - 数量: {trade['size']:.4f}")
+            else:
+                self.backtest_log_text.insert(tk.END, f"{i}. [平仓] {trade['time']} - {trade['direction']} - 入场: {trade['entry_price']:.2f} - 出场: {trade['exit_price']:.2f} - 盈亏: {trade['pnl']:+.2f} ({trade['pnl_pct']:+.2f}%)\n")
+                if hasattr(self, "backtest_logger"):
+                    self.backtest_logger.info(f"{i}. [平仓] {trade['time']} - {trade['direction']} - 入场: {trade['entry_price']:.2f} - 出场: {trade['exit_price']:.2f} - 盈亏: {trade['pnl']:+.2f} ({trade['pnl_pct']:+.2f}%)")
+        
+        if len(results['trades']) > 50:
+            self.backtest_log_text.insert(tk.END, f"... (还有 {len(results['trades']) - 50} 笔交易)\n")
+        
+        self.backtest_log_text.insert(tk.END, "="*80 + "\n")
+        # 只有当滚动条在最底部时才自动跟随
+        scroll_position = self.backtest_log_text.yview()
+        if scroll_position[1] >= 0.99:
+            self.backtest_log_text.see(tk.END)
+    
+    def _update_progress(self, value):
+        """更新进度条"""
+        self.backtest_progress["value"] = value
+        self.backtest_progress_label.config(text=f"{value}%")
+        self.backtest_progress.update()
+    
+    def _export_backtest_results(self):
+        """导出回测结果"""
+        from tkinter import filedialog
+        try:
+            content = self.backtest_log_text.get("1.0", tk.END)
+            if not content.strip():
+                messagebox.showwarning("提示", "没有可导出的回测结果！")
+                return
+            
+            file_path = filedialog.asksaveasfilename(
+                title="导出回测结果",
+                defaultextension=".txt",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+            )
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                messagebox.showinfo("成功", "回测结果已导出！")
+        except Exception as e:
+            messagebox.showerror("错误", f"导出失败: {e}")
+    
+    def _stop_backtest(self):
+        """停止回测"""
+        if hasattr(self, 'backtest_stop_event'):
+            self.backtest_stop_event.set()
+            self.backtest_log_text.insert(tk.END, f"[停止回测] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - 正在停止...\n")
+            self.stop_backtest_btn.config(state="disabled")
+    
+    def _clear_backtest_results(self):
+        """清空回测结果"""
+        if messagebox.askyesno("确认", "确定要清空回测结果吗？"):
+            self.backtest_log_text.delete("1.0", tk.END)
+            self.backtest_total_return_var.set("-")
+            self.backtest_win_rate_var.set("-")
+            self.backtest_profit_factor_var.set("-")
+            self.backtest_max_drawdown_var.set("-")
+            self.backtest_total_trades_var.set("-")
+            self.backtest_win_trades_var.set("-")
+            self.backtest_loss_trades_var.set("-")
+            self.backtest_avg_profit_var.set("-")
+            self.backtest_progress["value"] = 0
+            self.backtest_progress_label.config(text="0%")
+            self.log("回测结果已清空")
+    
+    def _get_backtest_data_dir(self):
+        """获取回测数据存储目录"""
+        import os
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_data")
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        return data_dir
+    
+    def _select_backtest_data_file(self):
+        """选择历史数据文件"""
+        from tkinter import filedialog
+        data_dir = self._get_backtest_data_dir()
+        file_path = filedialog.askopenfilename(
+            title="选择历史数据文件",
+            initialdir=data_dir,
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            self.backtest_data_file_var.set(file_path)
+    
+    def _refresh_backtest_data_list(self):
+        """刷新历史数据文件列表"""
+        import os
+        data_dir = self._get_backtest_data_dir()
+        try:
+            files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+            if files:
+                self.backtest_log_text.insert(tk.END, f"[数据文件] 找到 {len(files)} 个历史数据文件:\n")
+                for f in sorted(files):
+                    self.backtest_log_text.insert(tk.END, f"  - {f}\n")
+            else:
+                self.backtest_log_text.insert(tk.END, "[数据文件] 未找到历史数据文件\n")
+            self.backtest_log_text.see(tk.END)
+        except Exception as e:
+            self.backtest_log_text.insert(tk.END, f"[错误] 刷新文件列表失败: {e}\n")
+    
+    def _download_historical_data(self):
+        """按时间范围下载历史数据并保存，包含27个技术指标"""
+        import threading
+        import os
+        from datetime import datetime
+        from binance_api import BinanceAPI
+        
+        def download_data_thread():
+            try:
+                self.backtest_log_text.insert(tk.END, "[抓取数据] 开始获取历史数据...\n")
+                
+                start_year = self.backtest_start_year_var.get().strip()
+                start_month = self.backtest_start_month_var.get().strip()
+                start_day = self.backtest_start_day_var.get().strip()
+                end_year = self.backtest_end_year_var.get().strip()
+                end_month = self.backtest_end_month_var.get().strip()
+                end_day = self.backtest_end_day_var.get().strip()
+                
+                if not (start_year and start_month and start_day and end_year and end_month and end_day):
+                    self.backtest_log_text.insert(tk.END, "[错误] 请选择完整的开始时间和结束时间！\n")
+                    return
+                
+                start_time_str = f"{start_year}-{start_month}-{start_day} 00:00"
+                end_time_str = f"{end_year}-{end_month}-{end_day} 23:59"
+                
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 时间范围: {start_time_str} 至 {end_time_str}\n")
+                
+                if not hasattr(self, 'strategy') or not self.strategy:
+                    self.backtest_log_text.insert(tk.END, "[错误] 策略未初始化，请先运行一次回测\n")
+                    return
+                
+                self.backtest_log_text.insert(tk.END, "[抓取数据] 正在获取K线数据...\n")
+                
+                df = self.strategy.binance.get_historical_klines(
+                    self.strategy.symbol, 
+                    self.strategy.timeframe, 
+                    start_str=start_time_str,
+                    end_str=end_time_str
+                )
+                
+                if df is None or len(df) == 0:
+                    self.backtest_log_text.insert(tk.END, "[错误] 获取数据失败\n")
+                    return
+                
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 成功获取 {len(df)} 条原始K线数据\n")
+                
+                self.backtest_log_text.insert(tk.END, "[抓取数据] 正在计算27个技术指标...\n")
+                
+                df = df.copy()
+                
+                if 'volume' in df.columns:
+                    df['vol'] = df['volume']
+                if 'amount' in df.columns:
+                    df['amt'] = df['amount']
+                
+                close = df["close"].values
+                high = df["high"].values
+                low = df["low"].values
+                amount = df["amt"].values
+                
+                df["MA5"] = pd.Series(close).rolling(window=5).mean().values
+                df["MA10"] = pd.Series(close).rolling(window=10).mean().values
+                df["MA20"] = pd.Series(close).rolling(window=20).mean().values
+                
+                df["BIAS20"] = (close / df["MA20"] - 1) * 100
+                
+                tr1 = high - low
+                tr2 = np.abs(high - np.roll(close, 1))
+                tr3 = np.abs(low - np.roll(close, 1))
+                tr = np.maximum(tr1, np.maximum(tr2, tr3))
+                tr[0] = 0
+                df["ATR14"] = pd.Series(tr).rolling(window=14).mean().values
+                
+                df["AMPLITUDE"] = (high - low) / close * 100
+                
+                df["AMOUNT_MA5"] = pd.Series(amount).rolling(window=5).mean().values
+                df["AMOUNT_MA10"] = pd.Series(amount).rolling(window=10).mean().values
+                df["VOL_RATIO"] = amount / df["AMOUNT_MA5"]
+                
+                delta = pd.Series(close).diff()
+                gain = delta.where(delta > 0, 0)
+                loss = (-delta.where(delta < 0, 0))
+                avg_gain14 = gain.rolling(window=14).mean()
+                avg_loss14 = loss.rolling(window=14).mean()
+                rs14 = avg_gain14 / avg_loss14
+                df["RSI14"] = (100 - (100 / (1 + rs14))).values
+                
+                avg_gain7 = gain.rolling(window=7).mean()
+                avg_loss7 = loss.rolling(window=7).mean()
+                rs7 = avg_gain7 / avg_loss7
+                df["RSI7"] = (100 - (100 / (1 + rs7))).values
+                
+                ema12 = pd.Series(close).ewm(span=12, adjust=False).mean()
+                ema26 = pd.Series(close).ewm(span=26, adjust=False).mean()
+                df["MACD"] = ema12 - ema26
+                df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
+                df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
+                
+                df["PRICE_SLOPE5"] = (
+                    pd.Series(close)
+                    .rolling(window=5)
+                    .apply(
+                        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                        raw=True,
+                    )
+                    .values
+                )
+                df["PRICE_SLOPE10"] = (
+                    pd.Series(close)
+                    .rolling(window=10)
+                    .apply(
+                        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0,
+                        raw=True,
+                    )
+                    .values
+                )
+                
+                df["HIGH5"] = pd.Series(high).rolling(window=5).max().values
+                df["LOW5"] = pd.Series(low).rolling(window=5).min().values
+                df["HIGH10"] = pd.Series(high).rolling(window=10).max().values
+                df["LOW10"] = pd.Series(low).rolling(window=10).min().values
+                
+                df["VOL_BREAKOUT"] = (amount > df["AMOUNT_MA5"] * 1.5).astype(int)
+                df["VOL_SHRINK"] = (amount < df["AMOUNT_MA5"] * 0.5).astype(int)
+                
+                feature_list = [
+                    "open", "high", "low", "close", "vol", "amt", 
+                    "MA5", "MA10", "MA20",
+                    "BIAS20",
+                    "ATR14", "AMPLITUDE",
+                    "AMOUNT_MA5", "AMOUNT_MA10", "VOL_RATIO",
+                    "RSI14", "RSI7",
+                    "MACD", "MACD_HIST",
+                    "PRICE_SLOPE5", "PRICE_SLOPE10",
+                    "HIGH5", "LOW5", "HIGH10", "LOW10",
+                    "VOL_BREAKOUT", "VOL_SHRINK"
+                ]
+                
+                for col in feature_list:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                
+                time_col = None
+                if "timestamps" in df.columns:
+                    time_col = "timestamps"
+                elif "datetime" in df.columns:
+                    time_col = "datetime"
+                
+                if time_col:
+                    df = df[[time_col] + feature_list]
+                else:
+                    df = df[feature_list]
+                
+                df = df.dropna()
+                
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 成功计算27个技术指标，剩余 {len(df)} 条有效数据\n")
+                
+                data_dir = self._get_backtest_data_dir()
+                
+                if len(df) > 0 and 'timestamps' in df.columns:
+                    first_time = df['timestamps'].iloc[0]
+                    last_time = df['timestamps'].iloc[-1]
+                    
+                    first_time_str = str(first_time).replace(':', '-').replace(' ', '_')
+                    last_time_str = str(last_time).replace(':', '-').replace(' ', '_')
+                    
+                    filename = f"{self.strategy.symbol}_{self.strategy.timeframe}_{first_time_str}_to_{last_time_str}.csv"
+                else:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"{self.strategy.symbol}_{self.strategy.timeframe}_{timestamp}.csv"
+                
+                file_path = os.path.join(data_dir, filename)
+                
+                df.to_csv(file_path, index=False, encoding='utf-8')
+                
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 数据已保存到: {file_path}\n")
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 文件大小: {os.path.getsize(file_path)} 字节\n")
+                self.backtest_log_text.insert(tk.END, f"[抓取数据] 包含特征: {len(df.columns)} 个 (时间戳 + 27个技术指标)\n")
+                
+                self.backtest_data_file_var.set(file_path)
+                
+                messagebox.showinfo("成功", f"历史数据已抓取并保存！\n文件: {filename}\n包含27个技术指标")
+                
+            except Exception as e:
+                self.backtest_log_text.insert(tk.END, f"[错误] 抓取数据失败: {e}\n")
+                import traceback
+                self.backtest_log_text.insert(tk.END, f"{traceback.format_exc()}\n")
+        
+        thread = threading.Thread(target=download_data_thread)
+        thread.daemon = True
+        thread.start()
 
     def _create_help_tab(self, parent):
         """创建帮助标签页"""
@@ -6685,6 +9452,7 @@ class KronosTradingGUI:
 
 def main():
     root = tk.Tk()
+    root.withdraw()  # 先隐藏窗口
     KronosTradingGUI(root)
     root.mainloop()
 

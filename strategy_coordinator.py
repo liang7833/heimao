@@ -21,6 +21,8 @@ except ImportError:
     print("警告: fingpt_analyzer模块导入失败，部分功能受限")
 
 
+
+
 class StrategyCoordinator:
     """策略协调器 - 整合多源信号，生成优化交易决策"""
     
@@ -74,7 +76,8 @@ class StrategyCoordinator:
                 print("  加载FinGPT舆情分析器...")
                 try:
                     self.fingpt_analyzer = FinGPTSentimentAnalyzer(
-                        use_local_model=True
+                        use_local_model=True,
+                        use_qwen_preprocessing=True
                     )
                     self.fingpt_available = True
                     print("  ✓ FinGPT舆情分析器就绪")
@@ -93,6 +96,12 @@ class StrategyCoordinator:
             "black_swan_threshold": "HIGH",  # 黑天鹅风险阈值
             "enable_adaptive_filtering": True,  # 启用自适应过滤
         }
+        
+        # Qwen 状态（从 FinGPT 间接判断）
+        self.qwen_available = False
+        if self.fingpt_available and self.fingpt_analyzer:
+            if hasattr(self.fingpt_analyzer, 'qwen_processor') and self.fingpt_analyzer.qwen_processor:
+                self.qwen_available = True
         
         # 性能跟踪
         self.performance_stats = {
@@ -176,6 +185,7 @@ class StrategyCoordinator:
             "analysis_summary": {
                 "kronos_available": self.kronos_available,
                 "fingpt_available": self.fingpt_available,
+                "qwen_available": self.qwen_available,
                 "signal_integrated": kronos_signal is not None or sentiment_analysis is not None
             },
             "kronos_signal": kronos_signal,
@@ -235,7 +245,22 @@ class StrategyCoordinator:
             })
             return integration_result
         
-        # 使用FinGPT调整信号强度，但不过滤信号
+        # 检查风险等级：HIGH 风险时直接过滤信号
+        risk_level = sentiment_analysis.get("risk_level", "LOW")
+        
+        # 根据风险等级决定是否过滤
+        if risk_level == "HIGH":
+            integration_result.update({
+                "signal_filtered": True,
+                "filter_reason": "FinGPT检测到高风险，建议观望",
+                "filtered_by_risk": True,
+                "final_signal": None,
+                "integration_method": "高风险过滤"
+            })
+            print(f"    ⚠️  信号被过滤: 检测到高风险({risk_level})，建议观望")
+            return integration_result
+        
+        # 使用FinGPT调整信号强度（中低风险时）
         if self.fingpt_analyzer:
             try:
                 # 信号融合：结合技术信号和舆情信号（但保留原始信号有效性）
@@ -351,6 +376,13 @@ class StrategyCoordinator:
             "timestamp": datetime.now().isoformat()
         }
         
+        # 检查信号是否被过滤
+        if integration_result.get("signal_filtered", False):
+            recommendation["reasoning"].append(f"信号被过滤: {integration_result.get('filter_reason', '未知原因')}")
+            recommendation["action"] = "HOLD"
+            recommendation["confidence"] = 0.0
+            return recommendation
+        
         final_signal = integration_result.get("final_signal")
         if not final_signal:
             recommendation["reasoning"].append("无有效信号")
@@ -361,12 +393,6 @@ class StrategyCoordinator:
         trend_direction = final_signal.get("trend_direction", "NEUTRAL")
         trend_strength = final_signal.get("trend_strength", 0.0)
         risk_level = final_signal.get("risk_level", "LOW")
-        
-        # 检查信号是否被过滤（只用于显示，不改变confidence）
-        if integration_result.get("signal_filtered", False):
-            recommendation["reasoning"].append(f"信号被过滤: {integration_result.get('filter_reason', '未知原因')}")
-            # 但仍然使用原始信号强度
-            recommendation["confidence"] = trend_strength
         
         # 确定交易动作（统一方向标识：LONG/BUY = 做多，SHORT/SELL = 做空）
         if trend_direction in ["LONG", "BUY"]:

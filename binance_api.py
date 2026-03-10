@@ -35,6 +35,51 @@ class BinanceAPI:
         self.timestamp_offset = 0
         self.client = self._init_client()
         self._sync_time()
+        
+        # 初始化缓存目录
+        self.cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kline_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+    
+    def _get_cache_path(self, symbol, interval, start_str=None, end_str=None, limit=None):
+        """生成缓存文件路径"""
+        import hashlib
+        
+        # 生成唯一的缓存键
+        key_parts = [symbol, interval]
+        if start_str:
+            key_parts.append(str(start_str))
+        if end_str:
+            key_parts.append(str(end_str))
+        if limit:
+            key_parts.append(str(limit))
+        
+        cache_key = "_".join(key_parts)
+        # 使用MD5哈希来缩短文件名
+        cache_hash = hashlib.md5(cache_key.encode('utf-8')).hexdigest()
+        
+        return os.path.join(self.cache_dir, f"{symbol}_{interval}_{cache_hash}.csv")
+    
+    def _load_from_cache(self, cache_path):
+        """从缓存加载数据"""
+        if os.path.exists(cache_path):
+            try:
+                df = pd.read_csv(cache_path)
+                # 确保timestamps列是datetime类型
+                if 'timestamps' in df.columns:
+                    df['timestamps'] = pd.to_datetime(df['timestamps'])
+                print(f"✓ 从缓存加载数据: {os.path.basename(cache_path)}")
+                return df
+            except Exception as e:
+                print(f"⚠️ 加载缓存失败: {e}，将重新获取")
+        return None
+    
+    def _save_to_cache(self, df, cache_path):
+        """保存数据到缓存"""
+        try:
+            df.to_csv(cache_path, index=False)
+            print(f"✓ 数据已缓存: {os.path.basename(cache_path)}")
+        except Exception as e:
+            print(f"⚠️ 保存缓存失败: {e}")
 
     def _sync_time(self):
         try:
@@ -51,7 +96,23 @@ class BinanceAPI:
             self.client.timestamp_offset = 0
 
     def _init_client(self):
-        client = Client(self.api_key, self.api_secret, requests_params={"timeout": 30})
+        requests_params = {"timeout": 60}
+        
+        # 从环境变量读取代理配置
+        proxy_http = os.getenv("HTTP_PROXY")
+        proxy_https = os.getenv("HTTPS_PROXY")
+        
+        if proxy_http or proxy_https:
+            proxies = {}
+            if proxy_http:
+                proxies["http"] = proxy_http
+            if proxy_https:
+                proxies["https"] = proxy_https
+            requests_params["proxies"] = proxies
+            print(f"使用代理连接: {proxies}")
+        
+        client = Client(self.api_key, self.api_secret, requests_params=requests_params)
+        
         # 尝试设置recvWindow属性（某些版本的binance库支持）
         try:
             client.recvWindow = 10000
@@ -60,58 +121,181 @@ class BinanceAPI:
         return client
 
     def get_klines(self, symbol, interval, limit=1000):
-        try:
-            klines = self.client.futures_klines(
-                symbol=symbol, interval=interval, limit=limit
-            )
-            if not klines or len(klines) == 0:
-                print(f"获取K线数据失败：返回空数据")
-                return None
-                
-            df = pd.DataFrame(
-                klines,
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "close_time",
-                    "quote_asset_volume",
-                    "number_of_trades",
-                    "taker_buy_base",
-                    "taker_buy_quote",
-                    "ignore",
-                ],
-            )
-            df = df.astype(
-                {
-                    "open": float,
-                    "high": float,
-                    "low": float,
-                    "close": float,
-                    "volume": float,
-                    "quote_asset_volume": float,
-                    "taker_buy_base": float,
-                    "taker_buy_quote": float,
-                }
-            )
-            df["timestamps"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df["amount"] = df["quote_asset_volume"]
-            
-            result_df = df[["timestamps", "open", "high", "low", "close", "volume", "amount"]]
-            
-            if result_df.isnull().any().any():
-                print(f"警告：获取到的数据包含NaN值，已清理")
-                result_df = result_df.dropna()
-            
-            return result_df
-        except Exception as e:
-            print(f"获取K线数据错误: {e}")
-            import traceback
-            traceback.print_exc()
+        max_retries = 3
+        retry_delay = 2
+        
+        # 币安API的limit最大是1000，如果超过需要分批次获取
+        max_single_limit = 1000
+        
+        # 定义cache_path以避免变量未定义错误，但不使用缓存
+        cache_path = self._get_cache_path(symbol, interval, limit=limit)
+        # 禁用缓存，每次都获取最新数据
+        # cached_df = self._load_from_cache(cache_path)
+        # if cached_df is not None:
+        #     return cached_df
+        
+        # 如果limit <= 1000，直接获取
+        if limit <= max_single_limit:
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        print(f"获取K线数据重试 {attempt}/{max_retries}...")
+                    
+                    klines = self.client.futures_klines(
+                        symbol=symbol, interval=interval, limit=limit
+                    )
+                    if not klines or len(klines) == 0:
+                        print(f"获取K线数据失败：返回空数据")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        return None
+                        
+                    df = pd.DataFrame(
+                        klines,
+                        columns=[
+                            "timestamp",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                            "close_time",
+                            "quote_asset_volume",
+                            "number_of_trades",
+                            "taker_buy_base",
+                            "taker_buy_quote",
+                            "ignore",
+                        ],
+                    )
+                    df = df.astype(
+                        {
+                            "open": float,
+                            "high": float,
+                            "low": float,
+                            "close": float,
+                            "volume": float,
+                            "quote_asset_volume": float,
+                            "taker_buy_base": float,
+                            "taker_buy_quote": float,
+                        }
+                    )
+                    df["timestamps"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    df["amount"] = df["quote_asset_volume"]
+                    
+                    result_df = df[["timestamps", "open", "high", "low", "close", "volume", "amount"]]
+                    
+                    if result_df.isnull().any().any():
+                        print(f"警告：获取到的数据包含NaN值，已清理")
+                        result_df = result_df.dropna()
+                    
+                    # 禁用缓存，不保存数据
+                    # self._save_to_cache(result_df, cache_path)
+                    return result_df
+                except Exception as e:
+                    print(f"获取K线数据错误 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    else:
+                        import traceback
+                        traceback.print_exc()
+                        return None
+        
+        # 如果limit > 1000，分批次获取
+        print(f"需要获取 {limit} 条K线，分批次获取中...")
+        all_klines = []
+        remaining = limit
+        end_time = None
+        
+        while remaining > 0:
+            batch_size = min(max_single_limit, remaining)
+            for attempt in range(max_retries):
+                try:
+                    params = {
+                        "symbol": symbol,
+                        "interval": interval,
+                        "limit": batch_size
+                    }
+                    if end_time is not None:
+                        params["endTime"] = end_time
+                    
+                    klines = self.client.futures_klines(**params)
+                    if not klines or len(klines) == 0:
+                        print(f"批次获取K线数据失败：返回空数据")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        break
+                    
+                    # 添加到结果
+                    all_klines.extend(klines)
+                    remaining -= len(klines)
+                    
+                    # 更新end_time为最早时间（继续往前获取）
+                    if len(klines) > 0:
+                        end_time = klines[0][0] - 1
+                    
+                    # 避免频繁请求
+                    time.sleep(0.1)
+                    break
+                except Exception as e:
+                    print(f"批次获取K线数据错误 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    else:
+                        import traceback
+                        traceback.print_exc()
+                        return None
+        
+        if len(all_klines) == 0:
+            print(f"获取K线数据失败：所有批次都返回空数据")
             return None
+        
+        # 反转顺序（从旧到新）
+        all_klines = all_klines[::-1]
+        
+        df = pd.DataFrame(
+            all_klines,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "ignore",
+            ],
+        )
+        df = df.astype(
+            {
+                "open": float,
+                "high": float,
+                "low": float,
+                "close": float,
+                "volume": float,
+                "quote_asset_volume": float,
+                "taker_buy_base": float,
+                "taker_buy_quote": float,
+            }
+        )
+        df["timestamps"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["amount"] = df["quote_asset_volume"]
+        
+        result_df = df[["timestamps", "open", "high", "low", "close", "volume", "amount"]]
+        
+        if result_df.isnull().any().any():
+            print(f"警告：获取到的数据包含NaN值，已清理")
+            result_df = result_df.dropna()
+        
+        print(f"成功获取 {len(result_df)} 条K线数据")
+        # 禁用缓存，不保存数据
+        # self._save_to_cache(result_df, cache_path)
+        return result_df
 
     def get_recent_klines(self, symbol, interval, lookback=512):
         return self.get_klines(symbol, interval, limit=lookback)
@@ -120,64 +304,216 @@ class BinanceAPI:
         self, symbol, interval, start_str=None, end_str=None, limit=1500
     ):
         """
-        获取历史K线数据，支持分批次下载
+        获取历史K线数据，支持分批次下载完整时间范围内的数据
+        禁用数据缓存，每次都获取最新数据
         """
-        try:
-            klines = self.client.futures_klines(
-                symbol=symbol,
-                interval=interval,
-                startTime=start_str,
-                endTime=end_str,
-                limit=limit,
-            )
-            if not klines or len(klines) == 0:
-                print(f"获取历史K线数据失败：返回空数据")
-                return None
-                
-            df = pd.DataFrame(
-                klines,
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "close_time",
-                    "quote_asset_volume",
-                    "number_of_trades",
-                    "taker_buy_base",
-                    "taker_buy_quote",
-                    "ignore",
-                ],
-            )
-            df = df.astype(
-                {
-                    "open": float,
-                    "high": float,
-                    "low": float,
-                    "close": float,
-                    "volume": float,
-                    "quote_asset_volume": float,
-                    "taker_buy_base": float,
-                    "taker_buy_quote": float,
-                }
-            )
-            df["timestamps"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df["amount"] = df["quote_asset_volume"]
-            
-            result_df = df[["timestamps", "open", "high", "low", "close", "volume", "amount"]]
-            
-            if result_df.isnull().any().any():
-                print(f"警告：获取到的历史数据包含NaN值，已清理")
-                result_df = result_df.dropna()
-            
+        from datetime import datetime
+        
+        # 定义cache_path以避免变量未定义错误，但不使用缓存
+        cache_path = self._get_cache_path(symbol, interval, start_str, end_str, limit)
+        # 禁用缓存，每次都获取最新数据
+        # cached_df = self._load_from_cache(cache_path)
+        # if cached_df is not None:
+        #     return cached_df
+        
+        max_retries = 3
+        retry_delay = 2
+        max_single_limit = 1000
+        max_total_limit = 10000  # 安全限制，最多获取10000条防止无限循环
+        
+        # 如果没有设置开始和结束时间，默认获取最近的 limit 条 K 线
+        if start_str is None and end_str is None:
+            print(f"未设置时间范围，默认获取最近 {limit} 条K线")
+            result_df = self.get_recent_klines(symbol, interval, lookback=limit)
+            # 禁用缓存，不保存数据
+            # if result_df is not None:
+            #     self._save_to_cache(result_df, cache_path)
             return result_df
-        except Exception as e:
-            print(f"获取历史K线数据错误: {e}")
-            import traceback
-            traceback.print_exc()
+        
+        # 将时间字符串转换为毫秒时间戳
+        start_time_ms = None
+        end_time_ms = None
+        
+        if start_str:
+            if isinstance(start_str, str):
+                dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                start_time_ms = int(dt.timestamp() * 1000)
+            else:
+                start_time_ms = start_str
+        
+        if end_str:
+            if isinstance(end_str, str):
+                dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M")
+                end_time_ms = int(dt.timestamp() * 1000)
+            else:
+                end_time_ms = end_str
+        
+        print(f"获取历史K线: 开始时间={start_str}, 结束时间={end_str}")
+        
+        all_klines = []
+        
+        # 使用endTime往前获取，这样更可靠
+        current_end = end_time_ms
+        
+        while len(all_klines) < max_total_limit:
+            for attempt in range(max_retries):
+                try:
+                    params = {
+                        "symbol": symbol,
+                        "interval": interval,
+                        "limit": max_single_limit
+                    }
+                    
+                    if current_end is not None:
+                        params["endTime"] = current_end
+                    
+                    klines = self.client.futures_klines(**params)
+                    
+                    if not klines or len(klines) == 0:
+                        print(f"批次获取历史K线数据完成或返回空数据")
+                        # 跳出所有循环
+                        all_klines = all_klines[::-1]  # 反转成从旧到新
+                        if len(all_klines) == 0:
+                            return None
+                        
+                        # 筛选开始时间之后的数据
+                        if start_time_ms:
+                            filtered_klines = []
+                            for k in all_klines:
+                                if k[0] >= start_time_ms:
+                                    filtered_klines.append(k)
+                            all_klines = filtered_klines
+                        
+                        print(f"最终获取 {len(all_klines)} 条历史K线数据")
+                        result_df = self._process_klines_to_df(all_klines)
+                        # 禁用缓存，不保存数据
+                        # if result_df is not None:
+                        #     self._save_to_cache(result_df, cache_path)
+                        return result_df
+                    
+                    # 添加到结果（倒序添加，后面再反转）
+                    all_klines.extend(reversed(klines))
+                    
+                    # 如果获取的数据少于限制值，说明已经获取完了
+                    if len(klines) < max_single_limit:
+                        print(f"批次获取历史K线数据完成，当前获取 {len(all_klines)} 条")
+                        # 跳出所有循环
+                        all_klines = all_klines[::-1]  # 反转成从旧到新
+                        
+                        # 筛选开始时间之后的数据
+                        if start_time_ms:
+                            filtered_klines = []
+                            for k in all_klines:
+                                if k[0] >= start_time_ms:
+                                    filtered_klines.append(k)
+                            all_klines = filtered_klines
+                        
+                        print(f"最终获取 {len(all_klines)} 条历史K线数据")
+                        result_df = self._process_klines_to_df(all_klines)
+                        # 禁用缓存，不保存数据
+                        # if result_df is not None:
+                        #     self._save_to_cache(result_df, cache_path)
+                        return result_df
+                    
+                    # 更新current_end为第一条的时间-1，继续往前获取
+                    first_timestamp = klines[0][0]
+                    current_end = first_timestamp - 1
+                    
+                    # 避免频繁请求
+                    time.sleep(0.1)
+                    break
+                except Exception as e:
+                    print(f"批次获取历史K线数据错误 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    else:
+                        import traceback
+                        traceback.print_exc()
+                        if len(all_klines) == 0:
+                            return None
+                        else:
+                            print(f"已获取 {len(all_klines)} 条数据，继续处理...")
+                            # 跳出所有循环
+                            all_klines = all_klines[::-1]  # 反转成从旧到新
+                            
+                            # 筛选开始时间之后的数据
+                            if start_time_ms:
+                                filtered_klines = []
+                                for k in all_klines:
+                                    if k[0] >= start_time_ms:
+                                        filtered_klines.append(k)
+                                all_klines = filtered_klines
+                            
+                            print(f"最终获取 {len(all_klines)} 条历史K线数据")
+                            result_df = self._process_klines_to_df(all_klines)
+                            # 禁用缓存，不保存数据
+                            # if result_df is not None:
+                            #     self._save_to_cache(result_df, cache_path)
+                            return result_df
+        
+        # 超过最大限制
+        print(f"警告：已达到最大获取限制 {max_total_limit} 条")
+        all_klines = all_klines[::-1]  # 反转成从旧到新
+        
+        # 筛选开始时间之后的数据
+        if start_time_ms:
+            filtered_klines = []
+            for k in all_klines:
+                if k[0] >= start_time_ms:
+                    filtered_klines.append(k)
+            all_klines = filtered_klines
+        
+        print(f"最终获取 {len(all_klines)} 条历史K线数据")
+        result_df = self._process_klines_to_df(all_klines)
+        # 禁用缓存，不保存数据
+        # if result_df is not None:
+        #     self._save_to_cache(result_df, cache_path)
+        return result_df
+    
+    def _process_klines_to_df(self, klines):
+        """将K线数据转换为DataFrame"""
+        if not klines or len(klines) == 0:
             return None
+            
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "ignore",
+            ],
+        )
+        df = df.astype(
+            {
+                "open": float,
+                "high": float,
+                "low": float,
+                "close": float,
+                "volume": float,
+                "quote_asset_volume": float,
+                "taker_buy_base": float,
+                "taker_buy_quote": float,
+            }
+        )
+        df["timestamps"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["amount"] = df["quote_asset_volume"]
+        
+        result_df = df[["timestamps", "open", "high", "low", "close", "volume", "amount"]]
+        
+        if result_df.isnull().any().any():
+            print(f"警告：获取到的历史数据包含NaN值，已清理")
+            result_df = result_df.dropna()
+        
+        return result_df
 
     def get_account_balance(self):
         try:
@@ -363,6 +699,31 @@ class BinanceAPI:
                 adjusted_quantity = round(adjusted_quantity, quantity_precision)
                 print(f"  数量步长: {step_size}, 精度: {quantity_precision}, 调整后数量: {adjusted_quantity}")
                 break
+        
+        # 检查最小订单价值
+        min_notional = 100.0
+        for f in symbol_info.get("filters", []):
+            if f.get("filterType") == "MIN_NOTIONAL":
+                min_notional = float(f.get("notional", 100.0))
+                print(f"  最小订单价值: ${min_notional}")
+                break
+        
+        # 获取当前价格用于计算订单价值
+        current_price = self.get_mark_price(symbol)
+        if current_price is None:
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['lastPrice'])
+        
+        # 检查并调整订单数量以满足最小订单价值
+        order_notional = adjusted_quantity * current_price
+        if order_notional < min_notional:
+            min_required_qty = min_notional / current_price
+            # 向上取整到步长精度
+            adjusted_quantity = math.ceil(min_required_qty / step_size) * step_size
+            adjusted_quantity = round(adjusted_quantity, quantity_precision)
+            new_notional = adjusted_quantity * current_price
+            print(f"  ⚠️ 订单价值 ${order_notional:.2f} 小于最小要求 ${min_notional}")
+            print(f"  调整数量至: {adjusted_quantity} (订单价值: ${new_notional:.2f})")
         
         # 调整价格精度
         if price is not None:

@@ -11,7 +11,7 @@ def test_connection():
     print("测试币安API连接")
     print("=" * 80)
     load_dotenv()
-    api = BinanceAPI(testnet=False)
+    api = BinanceAPI()
 
     balance = api.get_account_balance()
     if balance:
@@ -41,7 +41,7 @@ def test_signal():
     print("=" * 80)
     load_dotenv()
 
-    api = BinanceAPI(testnet=False)
+    api = BinanceAPI()
     symbol = "BTCUSDT"
 
     print(f"正在获取 {StrategyConfig.LOOKBACK_PERIOD} 根5分钟K线数据...")
@@ -79,7 +79,7 @@ def run_once():
     print("=" * 80)
     print("执行一次专业策略分析")
     print("=" * 80)
-    strategy = ProfessionalTradingStrategy(testnet=False)
+    strategy = ProfessionalTradingStrategy()
     strategy.run_once()
 
 
@@ -87,8 +87,9 @@ def run_continuous():
     print("=" * 80)
     print("启动Kronos专业交易策略 - 连续运行模式")
     print("=" * 80)
-    strategy = ProfessionalTradingStrategy(testnet=False)
-    interval = 120
+    strategy = ProfessionalTradingStrategy()
+    interval = StrategyConfig.CHECK_INTERVAL
+    print(f"检查间隔: {interval}秒 ({interval/60:.1f}分钟)")
     strategy.run_loop(interval_seconds=interval)
 
 

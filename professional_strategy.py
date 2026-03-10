@@ -1,6 +1,7 @@
 import os
 import time
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from binance_api import BinanceAPI
@@ -9,11 +10,32 @@ from strategy_config import StrategyConfig
 from strategy_profiles import StrategyProfiles
 from market_state_analyzer import MarketStateAnalyzer, TimeStrategyAnalyzer
 from binance.client import Client
+from typing import Dict
+from color_print import (
+    print_open, 
+    print_close, 
+    print_success, 
+    print_error, 
+    print_warning, 
+    print_info,
+    print_signal_buy,
+    print_signal_sell,
+    print_signal_neutral,
+    print_trend_up,
+    print_trend_down,
+    print_reverse_signal,
+    print_ai_decision,
+    print_highlight
+)
 
 # 多智能体系统组件将在初始化时动态导入
 MULTI_AGENT_AVAILABLE = False
 FinGPTSentimentAnalyzer = None
 StrategyCoordinator = None
+
+# Qwen优化器
+QWEN_OPTIMIZER_AVAILABLE = False
+Qwen3Optimizer = None
 
 
 class ProfessionalTradingStrategy:
@@ -32,7 +54,9 @@ class ProfessionalTradingStrategy:
         ai_min_deviation=None,
         max_funding=None,
         min_funding=None,
+        analysis_callback=None,
     ):
+        self.analysis_callback = analysis_callback
         try:
             # 优先使用UTF-8编码加载
             load_dotenv(encoding="utf-8")
@@ -49,7 +73,7 @@ class ProfessionalTradingStrategy:
         self.interval = (
             interval if interval is not None else StrategyConfig.CHECK_INTERVAL
         )
-        self.model_name = model_name or "kronos-small"
+        self.model_name = model_name or os.getenv("MODEL", "kronos-small")
         self.threshold = (
             threshold
             if threshold is not None
@@ -78,14 +102,74 @@ class ProfessionalTradingStrategy:
             else float(os.getenv("MIN_FUNDING", "-1.0")) / 100.0
         )
 
-        # 趋势反转连续确认次数（默认2次）
-        self.reverse_confirm_count = 2
-        self.consecutive_reverse_count = 0
+        # 从 strategy_config.py 加载策略配置
+        strategy_config = getattr(StrategyConfig, "STRATEGY_CONFIG", {})
 
-        # 开仓连续确认次数（默认2次）
-        self.entry_confirm_count = 2
+        # 趋势反转连续确认次数
+        self.reverse_confirm_count = strategy_config.get("reverse_confirm_count", 2)
+        self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+
+        # 开仓连续确认次数
+        self.entry_confirm_count = strategy_config.get("entry_confirm_count", 2)
         self.consecutive_entry_count = 0
         self.last_entry_signal = None
+        
+        # 消息突破策略：连续预测确认次数
+        self.require_consecutive_prediction = strategy_config.get("require_consecutive_prediction", 1)
+        
+        # 开仓后计时参数
+        self.post_entry_hours = strategy_config.get("post_entry_hours", 2.0)
+        self.take_profit_min_pct = strategy_config.get("take_profit_min_pct", 0.6)
+        self.post_entry_time = None  # 开仓时间
+        self.post_entry_entry_count = 0  # 开仓后连续同向信号计数
+        
+        # 初始化所有策略配置变量（带默认值）
+        self.lookback_period = 91
+        self.prediction_length = 90
+        self.entry_filter = {
+            "max_kline_change": 0.015,
+            "max_funding_rate_long": 0.03,
+            "min_funding_rate_short": -0.03,
+            "support_buffer": 1.001,
+            "resistance_buffer": 0.999,
+        }
+        self.stop_loss_config = {
+            "long_buffer": 0.996,
+            "short_buffer": 1.004,
+        }
+        self.take_profit_config = {
+            "tp1_multiplier_long": 1.025,
+            "tp2_multiplier_long": 1.05,
+            "tp3_multiplier_long": 1.14,
+            "tp1_multiplier_short": 0.975,
+            "tp2_multiplier_short": 0.95,
+            "tp3_multiplier_short": 0.86,
+            "tp1_position_ratio": 0.35,
+            "tp2_position_ratio": 0.35,
+            "tp3_position_ratio": 0.30,
+        }
+        self.risk_management_config = {
+            "single_trade_risk": 0.029,
+            "daily_loss_limit": 0.12,
+            "max_consecutive_losses": 6,
+            "max_single_position": 0.29,
+            "max_daily_position": 0.85,
+            "extreme_move_threshold": 0.02,
+        }
+        self.trade_frequency_config = {
+            "max_daily_trades": 55,
+            "min_trade_interval_minutes": 3,
+            "active_hours_start": 0,
+            "active_hours_end": 24,
+        }
+        self.position_management_config = {
+            "initial_entry_ratio": 0.5,
+            "confirm_interval_kline": 2,
+            "add_on_profit": 0.01,
+            "add_ratio": 0.25,
+            "max_add_times": 2,
+        }
 
         self.strategy_profile = StrategyProfiles.get_profile(strategy_type)
 
@@ -96,23 +180,19 @@ class ProfessionalTradingStrategy:
         self.strategy_switch_count = 0
 
         self.binance = BinanceAPI()
-        self.analyzer = EnhancedKronosAnalyzer(model_name=self.model_name)
-        if self.analyzer is None:
-            print("[错误] EnhancedKronosAnalyzer创建失败!")
-            # 创建备用的技术分析器
-            from enhanced_kronos import TechnicalAnalyzer, AlphaSignalProcessor
-
-            class FallbackAnalyzer:
-                def __init__(self):
-                    self.use_kronos = False
-                    self.tech_analyzer = TechnicalAnalyzer()
-                    self.alpha_processor = AlphaSignalProcessor()
-
-                def get_enhanced_signal(self, df):
-                    return self.tech_analyzer.analyze(df)
-
-            self.analyzer = FallbackAnalyzer()
-            print("[备用] 使用技术分析器作为备用")
+        
+        # 初始化Kronos分析器，失败时直接抛出异常停止交易
+        try:
+            self.analyzer = EnhancedKronosAnalyzer(model_name=self.model_name)
+            if self.analyzer is None:
+                raise RuntimeError("EnhancedKronosAnalyzer创建失败，交易停止")
+            print("✓ Kronos分析器初始化成功")
+        except Exception as e:
+            print(f"❌ Kronos分析器初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"Kronos模型不可用，交易停止: {e}")
+        
         self.binance.set_leverage(self.symbol, self.leverage)
 
         self.daily_pnl = 0.0
@@ -128,13 +208,20 @@ class ProfessionalTradingStrategy:
         self.stop_loss_price = None
         self.take_profit_1_price = None
         self.take_profit_2_price = None
+        self.take_profit_3_price = None
         self.tp1_hit = False
+        self.tp2_hit = False
+        self.tp3_hit = False
 
         self.trade_history = []
         self.risk_manager = None
         self.error_count = 0
         self.last_error_time = None
         self.consecutive_errors = 0
+        
+        self.current_balance = 0.0
+        self.peak_balance = 0.0
+        self.max_drawdown = 0.0
         
         # 持仓状态追踪（用于检测从有持仓变为无持仓）
         self._last_had_position = False
@@ -151,12 +238,203 @@ class ProfessionalTradingStrategy:
             "last_optimization": datetime.now()
         }
 
+        # Qwen优化器
+        self.qwen_optimizer = None
+        self.last_qwen_optimization = None
+        self.qwen_optimization_interval_hours = 2  # 每2小时优化一次
+
+        # 保存默认参数（用于恢复）
+        self._save_default_parameters()
+
         # 初始化多智能体系统
         self.fingpt_analyzer = None
         self.strategy_coordinator = None
         self._initialize_multi_agent_system()
+        self._initialize_qwen_optimizer()
 
         self._initialize_balance()
+        
+        # 从StrategyConfig加载完整配置
+        self._load_strategy_config()
+
+    def _load_strategy_config(self):
+        """从StrategyConfig加载完整策略配置"""
+        try:
+            from strategy_config import StrategyConfig
+            
+            print("[策略配置] 正在从StrategyConfig加载完整配置...")
+            
+            # 加载基础参数
+            if hasattr(StrategyConfig, 'LOOKBACK_PERIOD'):
+                self.lookback_period = StrategyConfig.LOOKBACK_PERIOD
+                print(f"  ✓ LOOKBACK_PERIOD: {self.lookback_period}")
+            
+            if hasattr(StrategyConfig, 'PREDICTION_LENGTH'):
+                self.prediction_length = StrategyConfig.PREDICTION_LENGTH
+                print(f"  ✓ PREDICTION_LENGTH: {self.prediction_length}")
+            
+            # 加载入场过滤参数
+            if hasattr(StrategyConfig, 'ENTRY_FILTER'):
+                self.entry_filter = StrategyConfig.ENTRY_FILTER.copy()
+                print(f"  ✓ ENTRY_FILTER: {self.entry_filter}")
+            
+            # 加载止损参数
+            if hasattr(StrategyConfig, 'STOP_LOSS'):
+                self.stop_loss_config = StrategyConfig.STOP_LOSS.copy()
+                print(f"  ✓ STOP_LOSS: {self.stop_loss_config}")
+            
+            # 加载止盈参数
+            if hasattr(StrategyConfig, 'TAKE_PROFIT'):
+                self.take_profit_config = StrategyConfig.TAKE_PROFIT.copy()
+                print(f"  ✓ TAKE_PROFIT: {self.take_profit_config}")
+            
+            # 加载风险管理参数
+            if hasattr(StrategyConfig, 'RISK_MANAGEMENT'):
+                self.risk_management_config = StrategyConfig.RISK_MANAGEMENT.copy()
+                print(f"  ✓ RISK_MANAGEMENT: {self.risk_management_config}")
+            
+            # 加载交易频率参数
+            if hasattr(StrategyConfig, 'TRADE_FREQUENCY'):
+                self.trade_frequency_config = StrategyConfig.TRADE_FREQUENCY.copy()
+                print(f"  ✓ TRADE_FREQUENCY: {self.trade_frequency_config}")
+            
+            # 加载仓位管理参数
+            if hasattr(StrategyConfig, 'POSITION_MANAGEMENT'):
+                self.position_management_config = StrategyConfig.POSITION_MANAGEMENT.copy()
+                print(f"  ✓ POSITION_MANAGEMENT: {self.position_management_config}")
+            
+            print("[策略配置] 完整配置加载完成！")
+        except Exception as e:
+            print(f"[策略配置] 加载配置失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def update_config(self, config):
+        """动态更新策略配置
+        
+        Args:
+            config: 配置字典，格式与_strategy_config_file中一致
+        """
+        try:
+            print("[策略配置] 正在动态更新配置...")
+            
+            basic = config.get("basic", {})
+            entry = config.get("entry", {})
+            stop_loss = config.get("stop_loss", {})
+            take_profit = config.get("take_profit", {})
+            risk = config.get("risk", {})
+            frequency = config.get("frequency", {})
+            position = config.get("position", {})
+            strategy = config.get("strategy", {})
+            
+            # 更新基础参数
+            if "LEVERAGE" in basic:
+                new_leverage = basic["LEVERAGE"]
+                if new_leverage != self.leverage:
+                    self.leverage = new_leverage
+                    self.binance.set_leverage(self.symbol, self.leverage)
+                    print(f"  ✓ LEVERAGE 更新为: {self.leverage}x")
+            
+            if "TREND_STRENGTH_THRESHOLD" in basic:
+                self.threshold = basic["TREND_STRENGTH_THRESHOLD"]
+                print(f"  ✓ TREND_STRENGTH_THRESHOLD 更新为: {self.threshold}")
+            
+            if "LOOKBACK_PERIOD" in basic:
+                self.lookback_period = basic["LOOKBACK_PERIOD"]
+                print(f"  ✓ LOOKBACK_PERIOD 更新为: {self.lookback_period}")
+            
+            if "PREDICTION_LENGTH" in basic:
+                self.prediction_length = basic["PREDICTION_LENGTH"]
+                print(f"  ✓ PREDICTION_LENGTH 更新为: {self.prediction_length}")
+            
+            if "CHECK_INTERVAL" in basic:
+                self.interval = basic["CHECK_INTERVAL"]
+                print(f"  ✓ CHECK_INTERVAL 更新为: {self.interval}秒")
+            
+            # 更新入场过滤参数
+            if entry:
+                if not hasattr(self, 'entry_filter'):
+                    self.entry_filter = {}
+                self.entry_filter.update(entry)
+                print(f"  ✓ ENTRY_FILTER 更新为: {self.entry_filter}")
+            
+            # 更新止损参数
+            if stop_loss:
+                if not hasattr(self, 'stop_loss_config'):
+                    self.stop_loss_config = {}
+                self.stop_loss_config.update(stop_loss)
+                print(f"  ✓ STOP_LOSS 更新为: {self.stop_loss_config}")
+            
+            # 更新止盈参数
+            if take_profit:
+                if not hasattr(self, 'take_profit_config'):
+                    self.take_profit_config = {}
+                self.take_profit_config.update(take_profit)
+                print(f"  ✓ TAKE_PROFIT 更新为: {self.take_profit_config}")
+            
+            # 更新风险管理参数
+            if risk:
+                if not hasattr(self, 'risk_management_config'):
+                    self.risk_management_config = {}
+                self.risk_management_config.update(risk)
+                print(f"  ✓ RISK_MANAGEMENT 更新为: {self.risk_management_config}")
+                
+                # 同时更新风险管理器（如果存在）
+                if self.risk_manager:
+                    if "single_trade_risk" in risk:
+                        self.risk_manager.single_trade_risk = risk["single_trade_risk"]
+                    if "daily_loss_limit" in risk:
+                        self.risk_manager.daily_loss_limit = risk["daily_loss_limit"]
+                    if "max_consecutive_losses" in risk:
+                        self.risk_manager.max_consecutive_losses = risk["max_consecutive_losses"]
+                    if "max_single_position" in risk:
+                        self.risk_manager.max_single_position = risk["max_single_position"]
+                    if "max_daily_position" in risk:
+                        self.risk_manager.max_daily_position = risk["max_daily_position"]
+            
+            # 更新交易频率参数
+            if frequency:
+                if not hasattr(self, 'trade_frequency_config'):
+                    self.trade_frequency_config = {}
+                self.trade_frequency_config.update(frequency)
+                print(f"  ✓ TRADE_FREQUENCY 更新为: {self.trade_frequency_config}")
+            
+            # 更新仓位管理参数
+            if position:
+                if not hasattr(self, 'position_management_config'):
+                    self.position_management_config = {}
+                self.position_management_config.update(position)
+                print(f"  ✓ POSITION_MANAGEMENT 更新为: {self.position_management_config}")
+            
+            # 更新策略参数（第9个标签页）
+            if strategy:
+                if "entry_confirm_count" in strategy:
+                    self.entry_confirm_count = strategy["entry_confirm_count"]
+                    print(f"  ✓ entry_confirm_count 更新为: {self.entry_confirm_count}")
+                
+                if "reverse_confirm_count" in strategy:
+                    self.reverse_confirm_count = strategy["reverse_confirm_count"]
+                    print(f"  ✓ reverse_confirm_count 更新为: {self.reverse_confirm_count}")
+                
+                if "require_consecutive_prediction" in strategy:
+                    self.require_consecutive_prediction = strategy["require_consecutive_prediction"]
+                    print(f"  ✓ require_consecutive_prediction 更新为: {self.require_consecutive_prediction}")
+                
+                if "post_entry_hours" in strategy:
+                    self.post_entry_hours = strategy["post_entry_hours"]
+                    print(f"  ✓ post_entry_hours 更新为: {self.post_entry_hours}")
+                
+                if "take_profit_min_pct" in strategy:
+                    self.take_profit_min_pct = strategy["take_profit_min_pct"]
+                    print(f"  ✓ take_profit_min_pct 更新为: {self.take_profit_min_pct}")
+            
+            print("[策略配置] 动态配置更新完成！")
+            return True
+        except Exception as e:
+            print(f"[策略配置] 更新配置失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def _initialize_multi_agent_system(self):
         """初始化多智能体量化交易系统"""
@@ -215,6 +493,258 @@ class ProfessionalTradingStrategy:
             self.fingpt_analyzer = None
             self.strategy_coordinator = None
 
+    def _save_default_parameters(self):
+        """保存默认参数（用于恢复）"""
+        import copy
+        self.default_parameters = {
+            "threshold": self.threshold,
+            "leverage": self.leverage,
+            "entry_confirm_count": self.entry_confirm_count,
+            "reverse_confirm_count": self.reverse_confirm_count,
+            "strategy_profile": copy.deepcopy(self.strategy_profile)
+        }
+        print("[参数管理] 默认参数已保存")
+
+    def restore_default_parameters(self):
+        """恢复默认参数（公共方法）"""
+        self._restore_default_parameters()
+
+    def _restore_default_parameters(self):
+        """恢复默认参数（内部方法）"""
+        import copy
+        if hasattr(self, 'default_parameters'):
+            self.threshold = self.default_parameters["threshold"]
+            self.leverage = self.default_parameters["leverage"]
+            self.entry_confirm_count = self.default_parameters["entry_confirm_count"]
+            self.reverse_confirm_count = self.default_parameters["reverse_confirm_count"]
+            self.strategy_profile = copy.deepcopy(self.default_parameters["strategy_profile"])
+            print("[参数管理] 已恢复默认参数")
+            print(f"  - 趋势强度阈值: {self.threshold}")
+            print(f"  - 杠杆: {self.leverage}x")
+
+    def _initialize_qwen_optimizer(self):
+        """初始化Qwen策略优化器"""
+        global QWEN_OPTIMIZER_AVAILABLE, Qwen3Optimizer
+        
+        if Qwen3Optimizer is None:
+            try:
+                print("[Qwen优化器] 正在导入模块...")
+                from qwen3_optimizer import Qwen3Optimizer as QO
+                Qwen3Optimizer = QO
+                QWEN_OPTIMIZER_AVAILABLE = True
+                print("[Qwen优化器] 模块导入成功")
+            except Exception as e:
+                print(f"[Qwen优化器] 模块导入失败: {e}")
+                QWEN_OPTIMIZER_AVAILABLE = False
+                return
+        
+        if QWEN_OPTIMIZER_AVAILABLE:
+            try:
+                print("[Qwen优化器] 正在初始化...")
+                self.qwen_optimizer = Qwen3Optimizer()
+                if self.qwen_optimizer.is_loaded:
+                    print("[Qwen优化器] 初始化完成!")
+                else:
+                    print("[Qwen优化器] 模型加载失败，将不使用自动优化")
+                    self.qwen_optimizer = None
+            except Exception as e:
+                print(f"[Qwen优化器] 初始化失败: {e}")
+                self.qwen_optimizer = None
+
+    def _extract_market_conditions(self, df: pd.DataFrame) -> Dict:
+        """从K线数据提取市场条件"""
+        if df is None or len(df) < 20:
+            return {
+                "trend": "sideways",
+                "volatility": "medium",
+                "liquidity": "high",
+                "current_price": 0,
+                "price_change_24h": 0.0
+            }
+        
+        try:
+            current_price = df['close'].iloc[-1]
+            
+            price_change_24h = (df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0] * 100 if len(df) >= 48 else 0
+            
+            recent_returns = df['close'].pct_change().dropna()
+            volatility = recent_returns.std() * 100
+            
+            if volatility < 1.0:
+                volatility_level = "low"
+            elif volatility < 2.5:
+                volatility_level = "medium"
+            else:
+                volatility_level = "high"
+            
+            sma_20 = df['close'].rolling(20).mean().iloc[-1]
+            sma_50 = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else sma_20
+            
+            if current_price > sma_20 * 1.005:
+                trend = "upward"
+            elif current_price < sma_20 * 0.995:
+                trend = "downward"
+            else:
+                trend = "sideways"
+            
+            avg_volume = df['volume'].mean()
+            if avg_volume > 0:
+                liquidity = "high"
+            else:
+                liquidity = "medium"
+            
+            return {
+                "trend": trend,
+                "volatility": volatility_level,
+                "liquidity": liquidity,
+                "current_price": current_price,
+                "price_change_24h": price_change_24h
+            }
+        except Exception as e:
+            print(f"[Qwen优化器] 提取市场条件失败: {e}")
+            return {
+                "trend": "sideways",
+                "volatility": "medium",
+                "liquidity": "high",
+                "current_price": 0,
+                "price_change_24h": 0.0
+            }
+
+    def _run_qwen_optimization(self, df: pd.DataFrame, risk_profile: str = "balanced", 
+                               optimization_reason: str = "regular", 
+                               optimization_details: dict = None):
+        """运行Qwen参数优化
+        
+        Args:
+            df: K线数据
+            risk_profile: 风险偏好
+            optimization_reason: 优化原因
+                - "regular": 定期优化
+                - "loss_trigger": 亏损触发
+                - "performance": 表现不佳
+                - "market_change": 市场环境变化
+            optimization_details: 优化详细信息
+                - 亏损触发时: {loss_pct: float, consecutive_losses: int}
+                - 表现不佳时: {accuracy: float, win_rate: float}
+        """
+        if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
+            return
+        
+        now = datetime.now()
+        if self.last_qwen_optimization is not None:
+            time_since_last = (now - self.last_qwen_optimization).total_seconds() / 3600
+            if time_since_last < self.qwen_optimization_interval_hours:
+                return
+        
+        print("\n[Qwen优化器] 开始参数优化...")
+        try:
+            market_conditions = self._extract_market_conditions(df)
+            
+            print(f"  优化原因: {optimization_reason}")
+            if optimization_details:
+                print(f"  详细信息: {optimization_details}")
+            
+            print(f"  市场条件:")
+            print(f"    趋势: {market_conditions['trend']}")
+            print(f"    波动率: {market_conditions['volatility']}")
+            print(f"    当前价格: ${market_conditions['current_price']:.2f}")
+            print(f"    24h涨跌幅: {market_conditions['price_change_24h']:.2f}%")
+            
+            result = self.qwen_optimizer.analyze_and_optimize_all_parameters(
+                market_conditions=market_conditions,
+                risk_profile=risk_profile,
+                optimization_reason=optimization_reason,
+                optimization_details=optimization_details
+            )
+            
+            if result.get("success"):
+                print("[Qwen优化器] 优化成功!")
+                params = result.get("full_parameters", result)
+                
+                basic_params = params.get("basic_parameters", {})
+                entry_params = params.get("entry_filter", {})
+                strategy_params = params.get("strategy_parameters", {})
+                
+                print("\n  [应用临时参数]")
+                
+                if "TREND_STRENGTH_THRESHOLD" in basic_params:
+                    self.threshold = basic_params["TREND_STRENGTH_THRESHOLD"]
+                    print(f"    ✓ 趋势强度阈值: {self.threshold}")
+                
+                if "LEVERAGE" in basic_params:
+                    self.leverage = basic_params["LEVERAGE"]
+                    self.binance.set_leverage(self.symbol, self.leverage)
+                    print(f"    ✓ 杠杆倍数: {self.leverage}x")
+                
+                if "ENTRY_CONFIRM_COUNT" in basic_params:
+                    self.entry_confirm_count = basic_params["ENTRY_CONFIRM_COUNT"]
+                    print(f"    ✓ 开仓确认次数: {self.entry_confirm_count}")
+                
+                if "REVERSE_CONFIRM_COUNT" in basic_params:
+                    self.reverse_confirm_count = basic_params["REVERSE_CONFIRM_COUNT"]
+                    print(f"    ✓ 趋势反转确认次数: {self.reverse_confirm_count}")
+                
+                if entry_params:
+                    if "max_kline_change" in entry_params:
+                        self.entry_filter["max_kline_change"] = entry_params["max_kline_change"]
+                        print(f"    ✓ 最大K线变化: {entry_params['max_kline_change']}")
+                    if "support_buffer" in entry_params:
+                        self.entry_filter["support_buffer"] = entry_params["support_buffer"]
+                        print(f"    ✓ 支撑位缓冲: {entry_params['support_buffer']}")
+                    if "resistance_buffer" in entry_params:
+                        self.entry_filter["resistance_buffer"] = entry_params["resistance_buffer"]
+                        print(f"    ✓ 阻力位缓冲: {entry_params['resistance_buffer']}")
+                
+                if strategy_params:
+                    self._apply_strategy_profile_params(strategy_params)
+                
+                self.last_qwen_optimization = now
+                print("\n  提示: 以上为临时参数，程序重启或停止交易后将恢复默认值")
+            else:
+                print(f"[Qwen优化器] 优化失败: {result.get('error')}")
+        except Exception as e:
+            print(f"[Qwen优化器] 优化异常: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _apply_strategy_profile_params(self, strategy_params):
+        """应用策略配置参数 - 支持所有策略参数"""
+        
+        def _update_profile_section(profile_section, params_dict, section_name=""):
+            """递归更新策略配置的各个部分"""
+            for key, value in params_dict.items():
+                if key in profile_section:
+                    if isinstance(value, dict) and isinstance(profile_section[key], dict):
+                        _update_profile_section(profile_section[key], value, f"{section_name}.{key}")
+                    else:
+                        profile_section[key] = value
+                        print(f"    ✓ {section_name}.{key}: {value}")
+        
+        # 确定当前使用的策略类型
+        current_profile_name = self.strategy_profile.get("name", "")
+        
+        if "TREND_BURST" in strategy_params and "趋势爆发" in current_profile_name:
+            tb_params = strategy_params["TREND_BURST"]
+            print("  应用趋势爆发策略参数:")
+            _update_profile_section(self.strategy_profile, tb_params, "TREND_BURST")
+        
+        elif "RANGE_ARBITRAGE" in strategy_params and "震荡套利" in current_profile_name:
+            ra_params = strategy_params["RANGE_ARBITRAGE"]
+            print("  应用震荡套利策略参数:")
+            _update_profile_section(self.strategy_profile, ra_params, "RANGE_ARBITRAGE")
+        
+        elif "NEWS_BREAKOUT" in strategy_params and "消息突破" in current_profile_name:
+            nb_params = strategy_params["NEWS_BREAKOUT"]
+            print("  应用消息突破策略参数:")
+            _update_profile_section(self.strategy_profile, nb_params, "NEWS_BREAKOUT")
+        
+        else:
+            # 如果没有匹配的策略类型，尝试应用所有可能的参数
+            print("  应用通用策略参数:")
+            for strategy_name, params in strategy_params.items():
+                if isinstance(params, dict):
+                    _update_profile_section(self.strategy_profile, params, strategy_name)
+
     def _initialize_balance(self):
         balance = self.binance.get_wallet_balance()
         if balance:
@@ -222,15 +752,33 @@ class ProfessionalTradingStrategy:
             print(f"初始余额(不含盈亏): ${self.starting_balance:.2f}")
             # 初始化风险管理器
             self.risk_manager = EnhancedRiskManager(self.starting_balance, self.symbol)
+            # 从策略配置中加载风险参数
+            self._sync_risk_manager_config()
             print(f"风险管理器已初始化")
         else:
             # 如果获取余额失败，使用默认值初始化
             self.starting_balance = 0.0
             self.risk_manager = EnhancedRiskManager(0.0, self.symbol)
+            # 从策略配置中加载风险参数
+            self._sync_risk_manager_config()
             print("警告: 获取余额失败，使用默认值初始化风险管理器")
         
         # 初始化余额缓存
         self._cached_balance = self.starting_balance
+    
+    def _sync_risk_manager_config(self):
+        """同步风险管理器配置"""
+        if self.risk_manager and hasattr(self, 'risk_management_config'):
+            if "single_trade_risk" in self.risk_management_config:
+                self.risk_manager.single_trade_risk = self.risk_management_config["single_trade_risk"]
+            if "daily_loss_limit" in self.risk_management_config:
+                self.risk_manager.daily_loss_limit = self.risk_management_config["daily_loss_limit"]
+            if "max_consecutive_losses" in self.risk_management_config:
+                self.risk_manager.max_consecutive_losses = self.risk_management_config["max_consecutive_losses"]
+            if "max_single_position" in self.risk_management_config:
+                self.risk_manager.max_single_position = self.risk_management_config["max_single_position"]
+            if "max_daily_position" in self.risk_management_config:
+                self.risk_manager.max_daily_position = self.risk_management_config["max_daily_position"]
 
     def _reset_position_only(self):
         """只重置持仓状态，不重置开仓确认计数器（用于无持仓时）"""
@@ -241,10 +789,21 @@ class ProfessionalTradingStrategy:
         self.stop_loss_price = None
         self.take_profit_1_price = None
         self.take_profit_2_price = None
+        self.take_profit_3_price = None
         self.tp1_hit = False
+        self.tp2_hit = False
+        self.tp3_hit = False
         
         # 预测记录
         self.current_prediction = None
+        
+        # 趋势反转确认计数器
+        self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+        
+        # 开仓后计时变量
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
         
         print("[状态重置] 持仓状态已重置（保留开仓确认计数器）")
     
@@ -257,15 +816,28 @@ class ProfessionalTradingStrategy:
         self.stop_loss_price = None
         self.take_profit_1_price = None
         self.take_profit_2_price = None
+        self.take_profit_3_price = None
         self.tp1_hit = False
+        self.tp2_hit = False
+        self.tp3_hit = False
         
         # 开仓确认计数器
         self.consecutive_entry_count = 0
         self.last_entry_signal = None
+        
+        # 趋势反转确认计数器
         self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+        
+        # 开仓后计时变量
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
         
         # 预测记录
         self.current_prediction = None
+        
+        # 重置最后交易时间（让下次开仓不受时间间隔限制）
+        self.last_trade_time = None
         
         print("[状态重置] 所有持仓和开仓状态已完全重置")
 
@@ -311,21 +883,25 @@ class ProfessionalTradingStrategy:
             daily_loss = (
                 self.starting_balance - current_balance
             ) / self.starting_balance
-            if daily_loss >= StrategyConfig.RISK_MANAGEMENT["daily_loss_limit"]:
+            daily_loss_limit = self.risk_management_config.get("daily_loss_limit", 0.12)
+            if daily_loss >= daily_loss_limit:
                 return False, f"触及单日亏损限制 {daily_loss*100:.1f}%"
 
-        if self.daily_trades >= StrategyConfig.TRADE_FREQUENCY["max_daily_trades"]:
+        max_daily_trades = self.trade_frequency_config.get("max_daily_trades", 55)
+        if self.daily_trades >= max_daily_trades:
             return False, f"触及单日最大交易次数 {self.daily_trades}"
 
         if self.last_trade_time:
             time_since_last = (now - self.last_trade_time).total_seconds() / 60
+            print(f"[时间检查] 上次交易时间: {self.last_trade_time.strftime('%H:%M:%S')}, 当前时间: {now.strftime('%H:%M:%S')}, 已过 {time_since_last:.1f} 分钟")
+            min_interval = self.trade_frequency_config.get("min_trade_interval_minutes", 3)
             if (
                 time_since_last
-                < StrategyConfig.TRADE_FREQUENCY["min_trade_interval_minutes"]
+                < min_interval
             ):
                 return (
                     False,
-                    f"距离上次交易不足 {StrategyConfig.TRADE_FREQUENCY['min_trade_interval_minutes']} 分钟",
+                    f"距离上次交易不足 {min_interval} 分钟",
                 )
 
         # 增强风险管理检查
@@ -420,9 +996,14 @@ class ProfessionalTradingStrategy:
 
         if self.strategy_type == "auto":
             market_state = self.market_analyzer.analyze(df)
-            print(
-                f"[市场状态] {market_state['state']}, 强度: {market_state['strength']:.2f}, 置信度: {market_state['confidence']:.2f}"
-            )
+            state_name = market_state['state']
+            # 根据市场状态选择颜色
+            if state_name in ['trend', 'breakout']:
+                print_highlight(f"[市场状态] {state_name}, 强度: {market_state['strength']:.2f}, 置信度: {market_state['confidence']:.2f}")
+            elif state_name in ['ranging', 'neutral']:
+                print_info(f"[市场状态] {state_name}, 强度: {market_state['strength']:.2f}, 置信度: {market_state['confidence']:.2f}")
+            else:
+                print(f"[市场状态] {state_name}, 强度: {market_state['strength']:.2f}, 置信度: {market_state['confidence']:.2f}")
             self.time_analyzer.record_market_state(df, market_state)
             return market_state["state"]
 
@@ -442,8 +1023,12 @@ class ProfessionalTradingStrategy:
     def check_trading_hours(self):
         now = datetime.now()
         hour = now.hour
-        start = StrategyConfig.TRADE_FREQUENCY["active_hours_start"]
-        end = StrategyConfig.TRADE_FREQUENCY["active_hours_end"]
+        try:
+            start = self.trade_frequency_config.get("active_hours_start", 0)
+            end = self.trade_frequency_config.get("active_hours_end", 24)
+        except (KeyError, AttributeError):
+            # 如果配置有问题，默认全天交易
+            return True
 
         if start <= end:
             in_active = start <= hour < end
@@ -459,7 +1044,11 @@ class ProfessionalTradingStrategy:
         recent_change = abs(
             (df["close"].iloc[-1] - df["close"].iloc[-2]) / df["close"].iloc[-2]
         )
-        return recent_change >= StrategyConfig.RISK_MANAGEMENT["extreme_move_threshold"]
+        try:
+            threshold = self.risk_management_config.get("extreme_move_threshold", 0.02)
+        except (KeyError, AttributeError):
+            threshold = 0.02
+        return recent_change >= threshold
 
     def calculate_kline_change(self, df):
         if len(df) < 2:
@@ -472,16 +1061,23 @@ class ProfessionalTradingStrategy:
 
         kline_change = self.calculate_kline_change(df)
 
+        # 获取配置参数（带安全检查）
+        support_buffer = self.entry_filter.get("support_buffer", 1.001)
+        resistance_buffer = self.entry_filter.get("resistance_buffer", 0.999)
+        max_kline_change = self.entry_filter.get("max_kline_change", 0.015)
+        max_funding_rate_long = self.entry_filter.get("max_funding_rate_long", 0.03)
+        min_funding_rate_short = self.entry_filter.get("min_funding_rate_short", -0.03)
+
         # 统一方向标识：BUY = LONG, SELL = SHORT
         if trend_direction in ["LONG", "BUY"]:
             if (
                 current_price
-                < signal["pred_support"] * StrategyConfig.ENTRY_FILTER["support_buffer"]
+                < signal["pred_support"] * support_buffer
             ):
                 return False, "价格低于支撑位缓冲"
-            if kline_change < -StrategyConfig.ENTRY_FILTER["max_kline_change"]:
+            if kline_change < -max_kline_change:
                 return False, f"K线跌幅过大 {kline_change*100:.2f}%"
-            if funding_rate > StrategyConfig.ENTRY_FILTER["max_funding_rate_long"]:
+            if funding_rate > max_funding_rate_long:
                 return False, f"资金费率过高 {funding_rate*100:.6f}%"
             return True, "做多条件满足"
 
@@ -489,12 +1085,12 @@ class ProfessionalTradingStrategy:
             if (
                 current_price
                 > signal["pred_resistance"]
-                * StrategyConfig.ENTRY_FILTER["resistance_buffer"]
+                * resistance_buffer
             ):
                 return False, "价格高于阻力位缓冲"
-            if kline_change > StrategyConfig.ENTRY_FILTER["max_kline_change"]:
+            if kline_change > max_kline_change:
                 return False, f"K线涨幅过大 {kline_change*100:.2f}%"
-            if funding_rate < StrategyConfig.ENTRY_FILTER["min_funding_rate_short"]:
+            if funding_rate < min_funding_rate_short:
                 return False, f"资金费率过低 {funding_rate*100:.6f}%"
             return True, "做空条件满足"
 
@@ -504,15 +1100,17 @@ class ProfessionalTradingStrategy:
         step_size, min_notional = self._get_symbol_filters()
 
         total_balance = self.get_total_balance()
+        single_trade_risk = self.risk_management_config.get("single_trade_risk", 0.029)
+        max_single_position = self.risk_management_config.get("max_single_position", 0.29)
         risk_amount = (
-            total_balance * StrategyConfig.RISK_MANAGEMENT["single_trade_risk"]
+            total_balance * single_trade_risk
         )
         price_risk = abs(entry_price - stop_loss_price)
 
         if price_risk <= 0:
             size = (
                 total_balance
-                * StrategyConfig.RISK_MANAGEMENT["max_single_position"]
+                * max_single_position
                 / entry_price
             )
         else:
@@ -520,7 +1118,7 @@ class ProfessionalTradingStrategy:
 
         max_size = (
             total_balance
-            * StrategyConfig.RISK_MANAGEMENT["max_single_position"]
+            * max_single_position
             * self.leverage
         ) / entry_price
         size = min(size, max_size)
@@ -590,90 +1188,81 @@ class ProfessionalTradingStrategy:
             print(f"❌ 无效的趋势方向: {trend_direction}")
             return False
 
-        # 计算止损价
-        stop_loss_type = stop_loss_rules["type"]
-        if stop_loss_type in ["fixed", "tight"]:
-            if trend_direction in ["LONG", "BUY"]:
-                stop_loss = current_price * (1 - stop_loss_rules["long_pct"])
-            else:
-                stop_loss = current_price * (1 + stop_loss_rules["short_pct"])
-        elif stop_loss_type == "candle_extreme":
-            if trend_direction in ["LONG", "BUY"]:
-                candle_low = signal.get(
-                    "candle_low", signal.get("pred_low", current_price * 0.995)
-                )
-                stop_loss = candle_low * (1 - 0.001)  # 微小偏移
-            else:
-                candle_high = signal.get(
-                    "candle_high", signal.get("pred_high", current_price * 1.005)
-                )
-                stop_loss = candle_high * (1 + 0.001)  # 微小偏移
-        elif stop_loss_type == "ai_predicted":
-            # 使用AI预测的支撑阻力位作为止损止盈
-            if trend_direction in ["LONG", "BUY"]:
-                stop_loss = (
-                    signal["pred_support"] * StrategyConfig.STOP_LOSS["long_buffer"]
-                )
-            else:
-                stop_loss = (
-                    signal["pred_resistance"] * StrategyConfig.STOP_LOSS["short_buffer"]
-                )
-            direction_text = "pred_support" if trend_direction in ["LONG", "BUY"] else "pred_resistance"
-            print(f"  使用AI预测: 止损={stop_loss:.2f} (基于{direction_text})")
+        # ============================================
+        # 优先使用Kronos AI自主计算的止盈止损
+        # ============================================
+        if "ai_stop_loss" in signal and "ai_take_profit_1" in signal:
+            print("  [使用Kronos AI自主计算的止盈止损]")
+            stop_loss = signal["ai_stop_loss"]
+            tp1 = signal["ai_take_profit_1"]
+            tp2 = signal.get("ai_take_profit_2", None)
+            print(f"    止损: ${stop_loss:.2f} ({signal.get('sl_pct', 0)*100:.2f}%)")
+            print(f"    止盈1: ${tp1:.2f} ({signal.get('tp1_pct', 0)*100:.2f}%)")
+            if tp2:
+                print(f"    止盈2: ${tp2:.2f} ({signal.get('tp2_pct', 0)*100:.2f}%)")
         else:
-            if trend_direction in ["LONG", "BUY"]:
-                stop_loss = (
-                    signal["pred_support"] * StrategyConfig.STOP_LOSS["long_buffer"]
-                )
+            # 备选方案：使用策略配置
+            print("  [备选：使用策略配置计算止盈止损]")
+            # 先获取安全的配置参数
+            long_buffer = self.stop_loss_config.get("long_buffer", 0.996)
+            short_buffer = self.stop_loss_config.get("short_buffer", 1.004)
+            # 获取止盈配置参数
+            tp1_multiplier_long = self.take_profit_config.get("tp1_multiplier_long", 1.025)
+            tp2_multiplier_long = self.take_profit_config.get("tp2_multiplier_long", 1.05)
+            tp3_multiplier_long = self.take_profit_config.get("tp3_multiplier_long", 1.14)
+            tp1_multiplier_short = self.take_profit_config.get("tp1_multiplier_short", 0.975)
+            tp2_multiplier_short = self.take_profit_config.get("tp2_multiplier_short", 0.95)
+            tp3_multiplier_short = self.take_profit_config.get("tp3_multiplier_short", 0.86)
+            # 计算止损价
+            stop_loss_type = stop_loss_rules["type"]
+            if stop_loss_type in ["fixed", "tight"]:
+                if trend_direction in ["LONG", "BUY"]:
+                    stop_loss = current_price * (1 - stop_loss_rules["long_pct"])
+                else:
+                    stop_loss = current_price * (1 + stop_loss_rules["short_pct"])
+            elif stop_loss_type == "candle_extreme":
+                if trend_direction in ["LONG", "BUY"]:
+                    stop_loss = signal["pred_support"] * long_buffer
+                    print(f"    使用AI预测支撑位: 止损={stop_loss:.2f}")
+                else:
+                    stop_loss = signal["pred_resistance"] * short_buffer
+                    print(f"    使用AI预测阻力位: 止损={stop_loss:.2f}")
+            elif stop_loss_type == "ai_predicted":
+                if trend_direction in ["LONG", "BUY"]:
+                    stop_loss = signal["pred_support"] * long_buffer
+                else:
+                    stop_loss = signal["pred_resistance"] * short_buffer
+                direction_text = "pred_support" if trend_direction in ["LONG", "BUY"] else "pred_resistance"
+                print(f"    使用AI预测: 止损={stop_loss:.2f} (基于{direction_text})")
             else:
-                stop_loss = (
-                    signal["pred_resistance"] * StrategyConfig.STOP_LOSS["short_buffer"]
-                )
+                if trend_direction in ["LONG", "BUY"]:
+                    stop_loss = signal["pred_support"] * long_buffer
+                else:
+                    stop_loss = signal["pred_resistance"] * short_buffer
 
-        # 计算止盈价
-        take_profit_rules = exit_rules["take_profit"]
-        take_profit_type = take_profit_rules["type"]
+            # 计算止盈价 - 使用面板配置的止盈乘数
+            take_profit_rules = exit_rules["take_profit"]
+            take_profit_type = take_profit_rules["type"]
 
-        # 优先使用AI预测的目标价
-        if stop_loss_type == "ai_predicted":
-            if trend_direction in ["LONG", "BUY"]:
-                tp1 = signal["pred_resistance"] * 0.995  # AI预测阻力位下方
-                tp2 = signal["pred_high"] * 0.99  # AI预测最高价下方
+            if stop_loss_type == "ai_predicted":
+                if trend_direction in ["LONG", "BUY"]:
+                    tp1 = signal["pred_resistance"] * 0.995
+                    tp2 = signal["pred_high"] * 0.99
+                else:
+                    tp1 = signal["pred_support"] * 0.995
+                    tp2 = signal["pred_low"] * 0.99
+                print(f"    使用AI预测: 止盈1={tp1:.2f}, 止盈2={tp2:.2f}")
             else:
-                tp1 = signal["pred_support"] * 1.005  # AI预测支撑位上方
-                tp2 = signal["pred_low"] * 1.01  # AI预测最低价上方
-            print(f"  使用AI预测: 止盈1={tp1:.2f}, 止盈2={tp2:.2f}")
-        elif take_profit_type == "trailing":
-            if trend_direction in ["LONG", "BUY"]:
-                tp1 = current_price * (1 + take_profit_rules.get("tp1_pct", 0.012))
-                tp2 = current_price * (1 + take_profit_rules.get("tp2_pct", 0.025))
-            else:
-                tp1 = current_price * (1 - take_profit_rules.get("tp1_pct", 0.012))
-                tp2 = current_price * (1 - take_profit_rules.get("tp2_pct", 0.025))
-        elif take_profit_type == "midpoint":
-            target_range = take_profit_rules.get("target_pct_range", [0.008, 0.012])
-            target_pct = (target_range[0] + target_range[1]) / 2  # 取中间值
-            if trend_direction in ["LONG", "BUY"]:
-                tp1 = current_price * (1 + target_pct)
-                tp2 = None  # 震荡策略可能只有一个止盈位
-            else:
-                tp1 = current_price * (1 - target_pct)
-                tp2 = None
-        elif take_profit_type == "fixed":
-            target_pct = take_profit_rules.get("target_pct", 0.025)
-            if trend_direction in ["LONG", "BUY"]:
-                tp1 = current_price * (1 + target_pct)
-                tp2 = None  # 固定止盈策略可能只有一个止盈位
-            else:
-                tp1 = current_price * (1 - target_pct)
-                tp2 = None
-        else:
-            if trend_direction in ["LONG", "BUY"]:
-                tp1 = current_price * (1 + 0.012)
-                tp2 = current_price * (1 + 0.025)
-            else:
-                tp1 = current_price * (1 - 0.012)
-                tp2 = current_price * (1 - 0.025)
+                # 统一使用面板配置的止盈乘数
+                if trend_direction in ["LONG", "BUY"]:
+                    tp1 = current_price * tp1_multiplier_long
+                    tp2 = current_price * tp2_multiplier_long
+                    tp3 = current_price * tp3_multiplier_long
+                else:
+                    tp1 = current_price * tp1_multiplier_short
+                    tp2 = current_price * tp2_multiplier_short
+                    tp3 = current_price * tp3_multiplier_short
+                print(f"    使用面板配置: 止盈1={tp1:.2f}, 止盈2={tp2:.2f}, 止盈3={tp3:.2f}")
 
         position_size = self.calculate_position_size(current_price, stop_loss)
 
@@ -723,11 +1312,11 @@ class ProfessionalTradingStrategy:
             initial_size = position_size
 
         tp2_display = f"${tp2:.2f}" if tp2 is not None else "无"
-        print(f"开仓: {trend_direction}")
-        print(f"入场价: ${current_price:.2f}")
-        print(f"止损: ${stop_loss:.2f} ({stop_loss_rules.get('type', 'default')})")
-        print(f"止盈1: ${tp1:.2f}, 止盈2: {tp2_display}")
-        print(f"初始仓位: {initial_size}")
+        print_open(f"开仓: {trend_direction}")
+        print(f"  入场价: ${current_price:.2f}")
+        print(f"  止损: ${stop_loss:.2f} ({stop_loss_rules.get('type', 'default')})")
+        print(f"  止盈1: ${tp1:.2f}, 止盈2: {tp2_display}")
+        print(f"  初始仓位: {initial_size}")
 
         # 检查初始仓位是否满足最小名义金额要求（取交易所要求和用户设置的最大值）
         step_size, min_notional = self._get_symbol_filters()
@@ -848,9 +1437,16 @@ class ProfessionalTradingStrategy:
         self.stop_loss_price = stop_loss
         self.take_profit_1_price = tp1
         self.take_profit_2_price = tp2
+        self.take_profit_3_price = tp3
         self.tp1_hit = False
+        self.tp2_hit = False
+        self.tp3_hit = False
         self.last_trade_time = datetime.now()
         self.daily_trades += 1
+        
+        # 开仓后计时逻辑
+        self.post_entry_time = datetime.now()
+        self.post_entry_entry_count = 0
 
         # 保存当前预测，用于后续验证准确性
         self.current_prediction = {
@@ -906,6 +1502,9 @@ class ProfessionalTradingStrategy:
                     "trend_direction": trend_direction,
                 }
             )
+        
+        # 更新最后交易时间
+        self.last_trade_time = datetime.now()
 
         return True
 
@@ -918,7 +1517,7 @@ class ProfessionalTradingStrategy:
             self.current_position = None
             return False
 
-        print(f"平仓: {self.current_position}, 原因: {reason}")
+        print_close(f"平仓: {self.current_position}, 原因: {reason}")
 
         self.binance.cancel_all_orders(self.symbol)
         self.binance.cancel_all_algo_orders(self.symbol)
@@ -1099,6 +1698,10 @@ class ProfessionalTradingStrategy:
         stop_loss_rules = exit_rules["stop_loss"]
         take_profit_rules = exit_rules["take_profit"]
         
+        # 获取安全的配置参数
+        long_buffer = self.stop_loss_config.get("long_buffer", 0.996)
+        short_buffer = self.stop_loss_config.get("short_buffer", 1.004)
+        
         # 计算止损价
         stop_loss_type = stop_loss_rules["type"]
         if stop_loss_type in ["fixed", "tight"]:
@@ -1108,14 +1711,14 @@ class ProfessionalTradingStrategy:
                 new_stop = avg_price * (1 + stop_loss_rules["short_pct"])
         elif stop_loss_type == "ai_predicted":
             if self.current_position in ["LONG", "BUY"]:
-                new_stop = avg_price * StrategyConfig.STOP_LOSS["long_buffer"]
+                new_stop = avg_price * long_buffer
             else:
-                new_stop = avg_price * StrategyConfig.STOP_LOSS["short_buffer"]
+                new_stop = avg_price * short_buffer
         else:
             if self.current_position in ["LONG", "BUY"]:
-                new_stop = avg_price * StrategyConfig.STOP_LOSS["long_buffer"]
+                new_stop = avg_price * long_buffer
             else:
-                new_stop = avg_price * StrategyConfig.STOP_LOSS["short_buffer"]
+                new_stop = avg_price * short_buffer
         
         # 计算止盈价
         take_profit_type = take_profit_rules["type"]
@@ -1215,6 +1818,11 @@ class ProfessionalTradingStrategy:
         # 限制历史记录长度，避免内存无限增长
         if len(self.trade_history) > 1000:
             self.trade_history = self.trade_history[-1000:]
+        
+        # 加仓后重置开仓后计时，相当于新开仓
+        self.post_entry_time = datetime.now()
+        self.post_entry_entry_count = 0
+        self.last_trade_time = datetime.now()
 
         return True, f"加仓成功, 数量: {actual_add_size}, 新均价: ${avg_price:.2f}, 新止损: ${new_stop:.2f}"
 
@@ -1274,7 +1882,11 @@ class ProfessionalTradingStrategy:
             return df["close"].iloc[-1]
         return None
 
-    def check_position_status(self):
+    def check_position_status(self, df=None, latest_signal=None):
+        """
+        检查持仓状态并执行保护机制
+        新增：反向信号平仓、动态止损、趋势反转检测
+        """
         if not self.current_position:
             return
 
@@ -1287,31 +1899,144 @@ class ProfessionalTradingStrategy:
             self.current_position = None
             return
 
+        print(f"\n[持仓保护] 当前持仓: {self.current_position}, 价格: ${current_price:.2f}")
+
+        # ============================================
+        # 保护机制1：反向信号强制平仓
+        # ============================================
+        if latest_signal:
+            signal_direction = latest_signal.get("trend_direction", "")
+            signal_strength = latest_signal.get("trend_strength", 0)
+            
+            if (self.current_position == "LONG" and signal_direction in ["SHORT", "SELL"]) or \
+               (self.current_position == "SHORT" and signal_direction in ["LONG", "BUY"]):
+                
+                if signal_strength >= self.threshold * 0.8:
+                    print(f"  [反向信号平仓] 当前: {self.current_position}, 新信号: {signal_direction}, 强度: {signal_strength:.4f}")
+                    self.close_position("Kronos反向信号平仓")
+                    return
+
+        # ============================================
+        # 保护机制2：基于ATR的动态止损 + 移动止损
+        # ============================================
+        # 移动止损功能已暂时禁用
+        # if df is not None and len(df) >= 20:
+        #     # 计算ATR
+        #     high = df["high"].values
+        #     low = df["low"].values
+        #     close = df["close"].values
+        #     tr1 = high - low
+        #     tr2 = np.abs(high - np.roll(close, 1))
+        #     tr3 = np.abs(low - np.roll(close, 1))
+        #     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        #     tr[0] = 0
+        #     atr = pd.Series(tr).rolling(window=14).mean().iloc[-1]
+        #     atr_pct = atr / current_price
+        #     
+        #     print(f"  [动态止损] ATR: {atr:.2f} ({atr_pct*100:.2f}%)")
+        #     
+        #     # 动态止损 = 1.2 * ATR
+        #     dynamic_sl_pct = max(1.2 * atr_pct, 0.006)
+        #     
+        #     if self.current_position == "LONG":
+        #         new_dynamic_sl = current_price * (1 - dynamic_sl_pct)
+        #         # 移动止损：只向上移动，不向下
+        #         if self.stop_loss_price is None or new_dynamic_sl > self.stop_loss_price:
+        #             if self.stop_loss_price is None:
+        #                 print(f"  [移动止损] 设置初始止损: ${new_dynamic_sl:.2f}")
+        #             else:
+        #                 print(f"  [移动止损] 调整止损: ${self.stop_loss_price:.2f} -> ${new_dynamic_sl:.2f}")
+        #             self.stop_loss_price = new_dynamic_sl
+        #             # 更新交易所的止损订单
+        #             self.binance.cancel_all_orders(self.symbol)
+        #             self.binance.place_stop_loss_order(
+        #                 self.symbol, Client.SIDE_SELL, pos_amt, self.stop_loss_price
+        #             )
+        #     else:  # SHORT
+        #         new_dynamic_sl = current_price * (1 + dynamic_sl_pct)
+        #         # 移动止损：只向下移动，不向上
+        #         if self.stop_loss_price is None or new_dynamic_sl < self.stop_loss_price:
+        #             if self.stop_loss_price is None:
+        #                 print(f"  [移动止损] 设置初始止损: ${new_dynamic_sl:.2f}")
+        #             else:
+        #                 print(f"  [移动止损] 调整止损: ${self.stop_loss_price:.2f} -> ${new_dynamic_sl:.2f}")
+        #             self.stop_loss_price = new_dynamic_sl
+        #             # 更新交易所的止损订单
+        #             self.binance.cancel_all_orders(self.symbol)
+        #             self.binance.place_stop_loss_order(
+        #                 self.symbol, Client.SIDE_BUY, pos_amt, self.stop_loss_price
+        #             )
+
+        # ============================================
+        # 保护机制3：趋势反转检测（连续3次确认）
+        # ============================================
+        # MA均线反转检测已禁用，避免与Kronos信号反转检测冲突
+        # if df is not None and len(df) >= 50:
+        #     close_series = df["close"]
+        #     ma5 = close_series.rolling(5).mean().iloc[-1]
+        #     ma10 = close_series.rolling(10).mean().iloc[-1]
+        #     ma20 = close_series.rolling(20).mean().iloc[-1]
+        #     
+        #     # 检测趋势反转信号
+        #     reverse_signal = None
+        #     if self.current_position == "LONG":
+        #         # 多单：MA5下穿MA10 或 价格跌破MA20
+        #         if ma5 < ma10 * 1.0005 and close_series.iloc[-1] < ma20:
+        #             reverse_signal = "LONG"
+        #     else:  # SHORT
+        #         # 空单：MA5上穿MA10 或 价格突破MA20
+        #         if ma5 > ma10 * 0.9995 and close_series.iloc[-1] > ma20:
+        #             reverse_signal = "SHORT"
+        #     
+        #     # 处理反转信号
+        #     if reverse_signal is not None:
+        #         # 检查信号是否与上次一致
+        #         if reverse_signal == self.last_reverse_signal:
+        #             self.consecutive_reverse_count += 1
+        #             print_reverse_signal(f"  [趋势反转检测] 检测到趋势反转信号 [{reverse_signal}] ({self.consecutive_reverse_count}/{self.reverse_confirm_count})")
+        #             
+        #             # 达到确认次数，执行平仓
+        #             if self.consecutive_reverse_count >= self.reverse_confirm_count:
+        #                 if self.current_position == "LONG":
+        #                     print_highlight(f"  [趋势反转检测] 多单趋势反转确认: MA5(${ma5:.2f}) < MA10(${ma10:.2f}), 价格<MA20(${ma20:.2f})")
+        #                     self.close_position("趋势反转-多单")
+        #                 else:
+        #                     print_highlight(f"  [趋势反转检测] 空单趋势反转确认: MA5(${ma5:.2f}) > MA10(${ma10:.2f}), 价格>MA20(${ma20:.2f})")
+        #                     self.close_position("趋势反转-空单")
+        #                 return
+        #         else:
+        #             # 新的反转信号，重置计数器
+        #             self.consecutive_reverse_count = 1
+        #             self.last_reverse_signal = reverse_signal
+        #             print_reverse_signal(f"  [趋势反转检测] 检测到新趋势反转信号 [{reverse_signal}] (1/{self.reverse_confirm_count})")
+        #     else:
+        #         # 没有反转信号，重置计数器
+        #         if self.consecutive_reverse_count > 0:
+        #             print_info(f"  [趋势反转检测] 趋势反转信号中断，重置计数器")
+        #         self.consecutive_reverse_count = 0
+        #         self.last_reverse_signal = None
+
+        # ============================================
+        # 原有保护机制：固定止损止盈
+        # ============================================
+        # 获取安全的配置参数
+        tp1_position_ratio = self.take_profit_config.get("tp1_position_ratio", 0.35)
+        tp2_position_ratio = self.take_profit_config.get("tp2_position_ratio", 0.35)
+        tp3_position_ratio = self.take_profit_config.get("tp3_position_ratio", 0.30)
         if self.current_position == "LONG":
             if self.stop_loss_price and current_price <= self.stop_loss_price:
                 self.close_position("止损")
                 self.consecutive_losses += 1
-                # 止损后立即强制同步持仓状态
                 pos_type, pos_amt = self.get_current_position_info()
                 if pos_amt <= 0:
                     self.current_position = None
                     self.position_size = 0
-                # 移除交易暂停机制，确保止损后继续分析
-                # if (
-                #     self.consecutive_losses
-                #     >= StrategyConfig.RISK_MANAGEMENT["max_consecutive_losses"]
-                # ):
-                #     self.trading_paused_until = datetime.now() + timedelta(
-                #         minutes=StrategyConfig.RISK_MANAGEMENT[
-                #             "pause_after_losses_minutes"
-                #         ]
-                #     )
             elif (
                 not self.tp1_hit
                 and self.take_profit_1_price
                 and current_price >= self.take_profit_1_price
             ):
-                tp1_size = pos_amt * StrategyConfig.TAKE_PROFIT["tp1_position_ratio"]
+                tp1_size = pos_amt * tp1_position_ratio
                 remaining_size = pos_amt - tp1_size
                 print(f"触发止盈1，平仓 {tp1_size}，剩余仓位 {remaining_size}")
                 self.binance.cancel_all_orders(self.symbol)
@@ -1319,7 +2044,6 @@ class ProfessionalTradingStrategy:
                 self.binance.place_market_sell(self.symbol, tp1_size)
                 self.tp1_hit = True
                 self.stop_loss_price = self.position_entry_price * 1.001
-                # 为剩余仓位重新设置止损和止盈2订单
                 self.binance.place_stop_loss_order(
                     self.symbol, Client.SIDE_SELL, remaining_size, self.stop_loss_price
                 )
@@ -1332,37 +2056,50 @@ class ProfessionalTradingStrategy:
                     )
             elif (
                 self.tp1_hit
+                and not self.tp2_hit
                 and self.take_profit_2_price is not None
                 and current_price >= self.take_profit_2_price
             ):
-                self.close_position("止盈2")
+                tp2_size = pos_amt * tp2_position_ratio
+                remaining_size = pos_amt - tp2_size
+                print(f"触发止盈2，平仓 {tp2_size}，剩余仓位 {remaining_size}")
+                self.binance.cancel_all_orders(self.symbol)
+                self.binance.cancel_all_algo_orders(self.symbol)
+                self.binance.place_market_sell(self.symbol, tp2_size)
+                self.tp2_hit = True
+                self.stop_loss_price = self.position_entry_price * 1.002
+                self.binance.place_stop_loss_order(
+                    self.symbol, Client.SIDE_SELL, remaining_size, self.stop_loss_price
+                )
+                if self.take_profit_3_price is not None:
+                    self.binance.place_take_profit_order(
+                        self.symbol,
+                        Client.SIDE_SELL,
+                        remaining_size,
+                        self.take_profit_3_price,
+                    )
+            elif (
+                self.tp2_hit
+                and self.take_profit_3_price is not None
+                and current_price >= self.take_profit_3_price
+            ):
+                self.close_position("止盈3")
                 self.consecutive_losses = 0
 
         elif self.current_position == "SHORT":
             if self.stop_loss_price and current_price >= self.stop_loss_price:
                 self.close_position("止损")
                 self.consecutive_losses += 1
-                # 止损后立即强制同步持仓状态
                 pos_type, pos_amt = self.get_current_position_info()
                 if pos_amt <= 0:
                     self.current_position = None
                     self.position_size = 0
-                # 移除交易暂停机制，确保止损后继续分析
-                # if (
-                #     self.consecutive_losses
-                #     >= StrategyConfig.RISK_MANAGEMENT["max_consecutive_losses"]
-                # ):
-                #     self.trading_paused_until = datetime.now() + timedelta(
-                #         minutes=StrategyConfig.RISK_MANAGEMENT[
-                #             "pause_after_losses_minutes"
-                #         ]
-                #     )
             elif (
                 not self.tp1_hit
                 and self.take_profit_1_price
                 and current_price <= self.take_profit_1_price
             ):
-                tp1_size = pos_amt * StrategyConfig.TAKE_PROFIT["tp1_position_ratio"]
+                tp1_size = pos_amt * tp1_position_ratio
                 remaining_size = pos_amt - tp1_size
                 print(f"触发止盈1，平仓 {tp1_size}，剩余仓位 {remaining_size}")
                 self.binance.cancel_all_orders(self.symbol)
@@ -1370,7 +2107,6 @@ class ProfessionalTradingStrategy:
                 self.binance.place_market_buy(self.symbol, tp1_size)
                 self.tp1_hit = True
                 self.stop_loss_price = self.position_entry_price * 0.999
-                # 为剩余仓位重新设置止损和止盈2订单
                 self.binance.place_stop_loss_order(
                     self.symbol, Client.SIDE_BUY, remaining_size, self.stop_loss_price
                 )
@@ -1383,10 +2119,34 @@ class ProfessionalTradingStrategy:
                     )
             elif (
                 self.tp1_hit
+                and not self.tp2_hit
                 and self.take_profit_2_price is not None
                 and current_price <= self.take_profit_2_price
             ):
-                self.close_position("止盈2")
+                tp2_size = pos_amt * tp2_position_ratio
+                remaining_size = pos_amt - tp2_size
+                print(f"触发止盈2，平仓 {tp2_size}，剩余仓位 {remaining_size}")
+                self.binance.cancel_all_orders(self.symbol)
+                self.binance.cancel_all_algo_orders(self.symbol)
+                self.binance.place_market_buy(self.symbol, tp2_size)
+                self.tp2_hit = True
+                self.stop_loss_price = self.position_entry_price * 0.998
+                self.binance.place_stop_loss_order(
+                    self.symbol, Client.SIDE_BUY, remaining_size, self.stop_loss_price
+                )
+                if self.take_profit_3_price is not None:
+                    self.binance.place_take_profit_order(
+                        self.symbol,
+                        Client.SIDE_BUY,
+                        remaining_size,
+                        self.take_profit_3_price,
+                    )
+            elif (
+                self.tp2_hit
+                and self.take_profit_3_price is not None
+                and current_price <= self.take_profit_3_price
+            ):
+                self.close_position("止盈3")
                 self.consecutive_losses = 0
 
     def run_once(self):
@@ -1406,13 +2166,15 @@ class ProfessionalTradingStrategy:
 
         # 先检查持仓情况（不管风控限制，有持仓就要管理）
         df = self.binance.get_recent_klines(
-            self.symbol, self.timeframe, lookback=StrategyConfig.LOOKBACK_PERIOD
+            self.symbol, self.timeframe, lookback=self.lookback_period
         )
-        if df is None or len(df) < 200:
+        if df is None or len(df) < min(50, self.lookback_period):
             print("获取K线数据失败")
             total_time = time.time() - start_time
-            print(f"总执行耗时: {total_time:.2f}秒")
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
+
+        # Qwen参数优化已禁用，仅在亏损检查触发时运行
 
         funding_rate = self.binance.get_funding_rate(self.symbol)
         current_price = df["close"].iloc[-1]
@@ -1431,10 +2193,26 @@ class ProfessionalTradingStrategy:
             self._last_had_position = True
 
             # AI分析当前持仓
-            signal = self.analyzer.get_enhanced_signal(df)
+            signal = self.analyzer.get_enhanced_signal(df, analysis_callback=self.analysis_callback)
             print(
                 f"AI分析: 方向={signal['trend_direction']}, 强度={signal['trend_strength']:.4f}"
             )
+
+            # 先计算当前盈亏（确保后面要用到）
+            position_pnl_pct = 0
+            if self.position_entry_price and current_price:
+                if self.current_position == "LONG":
+                    position_pnl_pct = (
+                        (current_price - self.position_entry_price)
+                        / self.position_entry_price
+                        * 100
+                    )
+                else:
+                    position_pnl_pct = (
+                        (self.position_entry_price - current_price)
+                        / self.position_entry_price
+                        * 100
+                    )
 
             # 运行FinGPT舆情分析和策略协调器
             if self.strategy_coordinator is not None:
@@ -1458,22 +2236,51 @@ class ProfessionalTradingStrategy:
                         
                         print(f"\n[策略协调器] 信号过滤结果:")
                         print(f"  Kronos原始信号: {coordinator_signal.get('kronos_signal', 'UNKNOWN')}")
-                        print(f"  过滤后信号: {coordinator_signal.get('final_signal', 'UNKNOWN')}")
-                        print(f"  信号强度: {coordinator_signal.get('signal_strength', 0):.3f}")
-                        print(f"  执行建议: {coordinator_signal.get('recommendation', 'UNKNOWN')}")
-                        
-                        if coordinator_signal.get('filtered', False):
-                            print(f"  ⚠️ 信号被过滤原因: {coordinator_signal.get('filter_reason', '未知')}")
                         
                         final_signal = coordinator_signal.get('final_signal', 'NEUTRAL')
                         final_strength = coordinator_signal.get('signal_strength', 0)
                         
-                        if final_signal != 'NEUTRAL':
-                            print(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
+                        # 根据信号类型使用不同颜色显示
+                        if final_signal in ['BUY', 'LONG']:
+                            print_signal_buy(f"  过滤后信号: {final_signal}")
+                        elif final_signal in ['SELL', 'SHORT']:
+                            print_signal_sell(f"  过滤后信号: {final_signal}")
+                        else:
+                            print_signal_neutral(f"  过滤后信号: {final_signal}")
+                        
+                        print(f"  信号强度: {final_strength:.3f}")
+                        print(f"  执行建议: {coordinator_signal.get('recommendation', 'UNKNOWN')}")
+                        
+                        if coordinator_signal.get('filtered', False):
+                            print_warning(f"  ⚠️ 信号被过滤原因: {coordinator_signal.get('filter_reason', '未知')}")
+                        
+                        is_filtered = coordinator_signal.get('filtered', False)
+                        
+                        if is_filtered:
+                            print_warning(f"\n[策略协调器] 信号被过滤，建议观望，不执行交易")
+                            print("="*60 + "\n")
+                            print(f"当前盈亏: {position_pnl_pct:.2f}%")
+                            print_ai_decision(f"AI决策: 信号被过滤，持仓观望")
+                            self.check_position_status(df=df, latest_signal=signal)
+                            total_time = time.time() - start_time
+                            print(f"*******总执行耗时: {total_time:.2f}秒*******")
+                            return
+                        elif final_signal in ['BUY', 'SELL', 'LONG', 'SHORT']:
+                            if final_signal in ['BUY', 'LONG']:
+                                print_highlight(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
+                            else:
+                                print_highlight(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
                             signal['trend_direction'] = final_signal
                             signal['trend_strength'] = final_strength
                         else:
-                            print(f"\n[策略协调器] 建议观望，不执行交易")
+                            print_info(f"\n[策略协调器] 建议观望，不执行交易")
+                            print("="*60 + "\n")
+                            print(f"当前盈亏: {position_pnl_pct:.2f}%")
+                            print_ai_decision(f"AI决策: 观望")
+                            self.check_position_status(df=df, latest_signal=signal)
+                            total_time = time.time() - start_time
+                            print(f"*******总执行耗时: {total_time:.2f}秒*******")
+                            return
                     else:
                         print("[策略协调器] 未能生成综合信号，使用原始Kronos信号")
                         
@@ -1483,22 +2290,6 @@ class ProfessionalTradingStrategy:
                 
                 print("="*60 + "\n")
 
-            # 获取当前盈亏
-            position_pnl_pct = 0
-            if self.position_entry_price and current_price:
-                if self.current_position == "LONG":
-                    position_pnl_pct = (
-                        (current_price - self.position_entry_price)
-                        / self.position_entry_price
-                        * 100
-                    )
-                else:
-                    position_pnl_pct = (
-                        (self.position_entry_price - current_price)
-                        / self.position_entry_price
-                        * 100
-                    )
-
             print(f"当前盈亏: {position_pnl_pct:.2f}%")
 
             # AI决策
@@ -1506,49 +2297,129 @@ class ProfessionalTradingStrategy:
             should_add = False
             close_reason = ""
 
-            # 1. 强反转信号立即平仓（最高优先级）
-            # 趋势强度超过阈值2倍时，不需要连续确认，立即平仓
-            if self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
-                if signal["trend_strength"] > self.threshold * 2.0:
-                    should_close = True
-                    close_reason = "强趋势反转做空（立即平仓）"
-                    print(f"  ⚡ 检测到强做空信号（强度: {signal['trend_strength']:.4f}），立即平仓")
-                elif signal["trend_strength"] > self.threshold * 1.5:
+            # 1. 检查是否有强烈拐点（has_turning_point）或强烈信号
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            # 判断强烈信号条件：
+            # - 有拐点检测 → 强烈信号
+            # - 信号强度 > 阈值的1.5倍 → 强烈信号
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+
+            # 2. 开仓后计时逻辑（新功能）
+            if self.post_entry_time:
+                hours_since_entry = (datetime.now() - self.post_entry_time).total_seconds() / 3600
+                print(f"[开仓后计时] 已持仓 {hours_since_entry:.1f} 小时 (阈值: {self.post_entry_hours} 小时)")
+                
+                # 检查是否在a小时内
+                if hours_since_entry < self.post_entry_hours:
+                    # a小时内：检查同向信号
+                    is_same_direction = (
+                        (self.current_position == "LONG" and signal["trend_direction"] == "LONG") or
+                        (self.current_position == "SHORT" and signal["trend_direction"] == "SHORT")
+                    )
+                    
+                    if is_same_direction:
+                        # 同向信号：增加计数
+                        self.post_entry_entry_count += 1
+                        print(f"  [加仓检查] 检测到同向开仓信号，连续第 {self.post_entry_entry_count}/2 次")
+                        
+                        # 连续2次同向信号 → 加仓
+                        if self.post_entry_entry_count >= 2:
+                            should_add = True
+                            print_highlight(f"  ✅ 连续2次同向信号，准备加仓")
+                    else:
+                        # 非同向信号：重置计数
+                        self.post_entry_entry_count = 0
+                else:
+                    # 超过a小时：检查盈利是否大于0.6%，如果是就平仓
+                    if position_pnl_pct >= self.take_profit_min_pct:
+                        should_close = True
+                        close_reason = f"超过{self.post_entry_hours}小时且盈利{position_pnl_pct:.2f}% > {self.take_profit_min_pct}%"
+                        print_highlight(f"  ✅ 超过{self.post_entry_hours}小时且盈利达标，执行止盈平仓")
+
+            # 3. 反向信号检测和确认逻辑（强趋势和普通趋势共用一个计数器）
+            if not should_close and self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
+                if "short" == self.last_reverse_signal:
                     self.consecutive_reverse_count += 1
-                    print(f"  检测到做空信号，连续第{self.consecutive_reverse_count}次")
+                    if has_strong_signal:
+                        if has_turning_point:
+                            print_reverse_signal(f"  ⚡ 检测到强烈拐点做空信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        else:
+                            print_reverse_signal(f"  ⚡ 检测到强做空信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                    else:
+                        print_warning(f"  检测到正常做空信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                    
                     if self.consecutive_reverse_count >= self.reverse_confirm_count:
                         should_close = True
-                        close_reason = "趋势反转做空（连续确认）"
+                        if has_strong_signal:
+                            if has_turning_point:
+                                close_reason = "强烈拐点检测做空（连续确认）"
+                            else:
+                                close_reason = "强趋势反转做空（连续确认）"
+                        else:
+                            close_reason = "趋势反转做空（连续确认）"
+                        print_highlight(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
                 else:
-                    self.consecutive_reverse_count = 0
-            elif (
+                    # 新的信号，重置计数器
+                    self.consecutive_reverse_count = 1
+                    self.last_reverse_signal = "short"
+                    if has_strong_signal:
+                        if has_turning_point:
+                            print_reverse_signal(f"  ⚡ 检测到新强烈拐点做空信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                        else:
+                            print_reverse_signal(f"  ⚡ 检测到新强做空信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                    else:
+                        print_warning(f"  检测到新正常做空信号，连续第1/{self.reverse_confirm_count}次确认")
+            elif not should_close and (
                 self.current_position == "SHORT" and signal["trend_direction"] == "LONG"
             ):
-                if signal["trend_strength"] > self.threshold * 2.0:
-                    should_close = True
-                    close_reason = "强趋势反转做多（立即平仓）"
-                    print(f"  ⚡ 检测到强做多信号（强度: {signal['trend_strength']:.4f}），立即平仓")
-                elif signal["trend_strength"] > self.threshold * 1.5:
+                if "long" == self.last_reverse_signal:
                     self.consecutive_reverse_count += 1
-                    print(f"  检测到做多信号，连续第{self.consecutive_reverse_count}次")
+                    if has_strong_signal:
+                        if has_turning_point:
+                            print_reverse_signal(f"  ⚡ 检测到强烈拐点做多信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        else:
+                            print_reverse_signal(f"  ⚡ 检测到强做多信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                    else:
+                        print_warning(f"  检测到正常做多信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                    
                     if self.consecutive_reverse_count >= self.reverse_confirm_count:
                         should_close = True
-                        close_reason = "趋势反转做多（连续确认）"
+                        if has_strong_signal:
+                            if has_turning_point:
+                                close_reason = "强烈拐点检测做多（连续确认）"
+                            else:
+                                close_reason = "强趋势反转做多（连续确认）"
+                        else:
+                            close_reason = "趋势反转做多（连续确认）"
+                        print_highlight(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
                 else:
-                    self.consecutive_reverse_count = 0
+                    # 新的信号，重置计数器
+                    self.consecutive_reverse_count = 1
+                    self.last_reverse_signal = "long"
+                    if has_strong_signal:
+                        if has_turning_point:
+                            print_reverse_signal(f"  ⚡ 检测到新强烈拐点做多信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                        else:
+                            print_reverse_signal(f"  ⚡ 检测到新强做多信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                    else:
+                        print_warning(f"  检测到新正常做多信号，连续第1/{self.reverse_confirm_count}次确认")
             else:
-                # 趋势未反转，重置计数
-                self.consecutive_reverse_count = 0
+                # 趋势未反转，但保留计数器，避免频繁重置
+                pass
 
-            # 2. 亏损过大强制平仓
-            if position_pnl_pct < -3:
+            # 4. 亏损过大强制平仓
+            if not should_close and position_pnl_pct < -3:
                 should_close = True
                 close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
+                print(f"  ⚡ 亏损过大，强制平仓")
 
-            # 盈利且趋势有利可加仓
-            if (
-                not should_close
-                and position_pnl_pct > 1
+            # 5. 原有加仓逻辑保留（与新加仓逻辑共存）
+            if not should_close and not should_add and (
+                position_pnl_pct > 1
                 and signal["trend_strength"] > self.threshold
             ):
                 if (
@@ -1561,17 +2432,17 @@ class ProfessionalTradingStrategy:
                     should_add = True
 
             if should_close:
-                print(f"AI决策: 平仓 - {close_reason}")
+                print_ai_decision(f"AI决策: 平仓 - {close_reason}")
                 self.close_position(close_reason)
             elif should_add:
-                print(f"AI决策: 加仓 - 盈利{position_pnl_pct:.2f}%且趋势有利")
+                print_ai_decision(f"AI决策: 加仓 - 盈利{position_pnl_pct:.2f}%且趋势有利")
                 self.add_position()
             else:
                 print(f"AI决策: 持仓观望")
-                self.check_position_status()
+                self.check_position_status(df=df, latest_signal=signal)
 
             total_time = time.time() - start_time
-            print(f"总执行耗时: {total_time:.2f}秒")
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
         else:
             print(f"未检测到持仓 (返回值: pos_type={pos_type}, pos_amt={pos_amt})")
@@ -1589,6 +2460,7 @@ class ProfessionalTradingStrategy:
 
         # 无持仓，检查风控后才能开仓
         risk_ok, risk_msg = self.check_risk_limits()
+        self.last_risk_msg = risk_msg  # 保存风控消息供后面使用
         if not risk_ok:
             print(f"风控限制: {risk_msg}")
             # 即使有风控限制，也继续进行市场分析
@@ -1630,7 +2502,7 @@ class ProfessionalTradingStrategy:
 
         print("正在分析市场...")
         step3_start = time.time()
-        signal = self.analyzer.get_enhanced_signal(df)
+        signal = self.analyzer.get_enhanced_signal(df, analysis_callback=self.analysis_callback)
         step3_time = time.time() - step3_start
         print(f"Kronos分析耗时: {step3_time:.2f}秒")
 
@@ -1678,8 +2550,12 @@ class ProfessionalTradingStrategy:
                     # 完全采用策略协调器的决策
                     final_signal = coordinator_signal.get('final_signal', 'NEUTRAL')
                     final_strength = coordinator_signal.get('signal_strength', 0)
+                    is_filtered = coordinator_signal.get('filtered', False)
                     
-                    if final_signal != 'NEUTRAL':
+                    if is_filtered:
+                        print(f"\n[策略协调器] 信号被过滤，建议观望，不执行交易")
+                        signal['signal_valid'] = False
+                    elif final_signal in ['BUY', 'SELL', 'LONG', 'SHORT']:
                         print(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
                         signal['trend_direction'] = final_signal
                         signal['trend_strength'] = final_strength
@@ -1696,16 +2572,30 @@ class ProfessionalTradingStrategy:
             
             print("="*60 + "\n")
 
+        # 显示当前状态信息
+        print(f"当前状态: 无持仓, can_open_position={can_open_position}, signal_valid={signal.get('signal_valid', True)}")
+
         # 如果不能开仓，分析完市场后就结束
         if not can_open_position:
+            print_ai_decision(f"AI决策: 无法开仓 - {getattr(self, 'last_risk_msg', '风控限制')}")
             total_time = time.time() - start_time
-            print(f"总执行耗时: {total_time:.2f}秒")
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
+            return
+
+        # 如果信号已经被策略协调器过滤，直接跳过
+        if not signal.get("signal_valid", True):
+            print_ai_decision("AI决策: 信号被策略协调器过滤，观望")
+            # 重置开仓确认计数器
+            self.consecutive_entry_count = 0
+            self.last_entry_signal = None
+            total_time = time.time() - start_time
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
         # 自动/时间策略切换
         effective_strategy = self._determine_effective_strategy(df, signal)
         if effective_strategy != self.current_effective_strategy:
-            print(
+            print_highlight(
                 f"[策略切换] {self.current_effective_strategy} -> {effective_strategy}"
             )
             self.current_effective_strategy = effective_strategy
@@ -1714,45 +2604,65 @@ class ProfessionalTradingStrategy:
 
         effective_strategy = self.current_effective_strategy
 
-        if effective_strategy == "trend":
-            signal["signal_valid"] = self._check_trend_entry(
-                signal, df, current_price, funding_rate
-            )
-        elif effective_strategy == "range":
-            signal["signal_valid"] = self._check_range_entry(
-                signal, df, current_price, funding_rate
-            )
-        elif effective_strategy == "breakout":
-            signal["signal_valid"] = self._check_breakout_entry(
-                signal, df, current_price, funding_rate
-            )
+        # 只有在信号仍然有效时才进行入场检查
+        if signal.get("signal_valid", True):
+            if effective_strategy == "trend":
+                signal["signal_valid"] = self._check_trend_entry(
+                    signal, df, current_price, funding_rate
+                )
+            elif effective_strategy == "range":
+                signal["signal_valid"] = self._check_range_entry(
+                    signal, df, current_price, funding_rate
+                )
+            elif effective_strategy == "breakout":
+                signal["signal_valid"] = self._check_breakout_entry(
+                    signal, df, current_price, funding_rate
+                )
 
         if not signal["signal_valid"]:
-            print("信号无效，跳过")
+            print_ai_decision("AI决策: 信号无效，观望")
             total_time = time.time() - start_time
-            print(f"总执行耗时: {total_time:.2f}秒")
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
         entry_ok, entry_msg = self.check_entry_conditions(signal, df, funding_rate)
         if not entry_ok:
-            print(f"入场条件不满足: {entry_msg}")
+            print_ai_decision(f"AI决策: 入场条件不满足 - {entry_msg}")
             total_time = time.time() - start_time
-            print(f"总执行耗时: {total_time:.2f}秒")
+            print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
-        print(f"入场条件满足: {entry_msg}")
+        print_success(f"入场条件满足: {entry_msg}")
 
-        # 开仓连续确认机制
+        # 1. 检查是否有强烈拐点或强烈信号
+        has_strong_signal = False
+        has_turning_point = signal.get("has_turning_point", False)
+        signal_strength = signal.get("trend_strength", 0)
+        
+        # 判断强烈信号条件：
+        # - 有拐点检测 → 强烈信号
+        # - 信号强度 > 阈值的1.5倍 → 强烈信号
+        if has_turning_point or signal_strength > self.threshold * 1.5:
+            has_strong_signal = True
+
+        # 2. 开仓连续确认机制（所有信号都遵循确认次数配置）
         current_entry_signal = signal["trend_direction"]
 
         if current_entry_signal == self.last_entry_signal:
+            # 信号一致 → 增加计数
             self.consecutive_entry_count += 1
-            print(
-                f"  检测到{current_entry_signal}信号，连续第{self.consecutive_entry_count}次"
-            )
+            if has_strong_signal:
+                if has_turning_point:
+                    print(f"  ⚡ 检测到强烈拐点{current_entry_signal}信号（强度: {signal_strength:.4f}，连续第{self.consecutive_entry_count}/{self.entry_confirm_count}次确认")
+                else:
+                    print(f"  ⚡ 检测到强{current_entry_signal}信号（强度: {signal_strength:.4f}，连续第{self.consecutive_entry_count}/{self.entry_confirm_count}次确认")
+            else:
+                print(
+                    f"  检测到{current_entry_signal}信号，连续第{self.consecutive_entry_count}/{self.entry_confirm_count}次确认"
+                )
 
             if self.consecutive_entry_count >= self.entry_confirm_count:
-                print(f"  连续{self.entry_confirm_count}次确认，执行开仓")
+                print(f"  ✅ 连续{self.entry_confirm_count}次确认，执行开仓")
                 self.open_position(signal)
                 # 重置计数器
                 self.consecutive_entry_count = 0
@@ -1765,14 +2675,26 @@ class ProfessionalTradingStrategy:
             # 信号变化，重置计数器
             self.consecutive_entry_count = 1
             self.last_entry_signal = current_entry_signal
-            print(f"  首次检测到{current_entry_signal}信号，开始计数")
+            if has_strong_signal:
+                if has_turning_point:
+                    print(f"  ⚡ 首次检测到强烈拐点{current_entry_signal}信号（强度: {signal_strength:.4f}，开始计数")
+                else:
+                    print(f"  ⚡ 首次检测到强{current_entry_signal}信号（强度: {signal_strength:.4f}，开始计数")
+            else:
+                print(f"  首次检测到{current_entry_signal}信号，开始计数")
+        
+        # 显示最终AI决策
+        if self.consecutive_entry_count >= self.entry_confirm_count:
+            print_ai_decision(f"AI决策: 开仓（{current_entry_signal}）")
+        else:
+            print_ai_decision(f"AI决策: 等待确认（{self.consecutive_entry_count}/{self.entry_confirm_count}次）")
 
         total_time = time.time() - start_time
-        print(f"总执行耗时: {total_time:.2f}秒")
+        print(f"*******总执行耗时: {total_time:.2f}秒*******")
 
     def _check_trend_entry(self, signal, df, current_price, funding_rate):
-        self.strategy_profile["ai_filter"]
-        self.strategy_profile["entry_rules"]
+        ai_filter = self.strategy_profile["ai_filter"]
+        entry_rules = self.strategy_profile["entry_rules"]
         special_filters = self.strategy_profile.get("special_filters", {})
 
         effective_threshold = self.threshold
@@ -1817,10 +2739,11 @@ class ProfessionalTradingStrategy:
         print("入场条件检查:")
         print("-" * 60)
 
-        # 1. 趋势强度检查（使用GUI设置的阈值）
-        trend_ok = signal["trend_strength"] >= effective_threshold
+        # 1. 趋势强度检查（使用策略配置的最小趋势强度）
+        trend_min_threshold = ai_filter.get("min_trend_strength", self.ai_min_trend)
+        trend_ok = signal["trend_strength"] >= trend_min_threshold
         print(
-            f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} 阈值 {effective_threshold}"
+            f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} 最小要求 {trend_min_threshold}"
         )
         if not trend_ok:
             print("=" * 60)
@@ -1828,19 +2751,21 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 2. AI最小趋势强度检查
-        ai_trend_ok = signal["trend_strength"] >= self.ai_min_trend
-        print(
-            f"  [2] AI趋势强度: {signal['trend_strength']:.4f} {'✓' if ai_trend_ok else '✗'} 最小要求 {self.ai_min_trend}"
-        )
-        if not ai_trend_ok:
-            print("=" * 60)
-            print(f"信号跳过 - AI趋势强度不满足")
-            print("=" * 60)
-            return False
+        # 2. 强方向要求检查
+        require_strong_direction = ai_filter.get("require_strong_direction", False)
+        if require_strong_direction:
+            strong_direction_ok = abs(signal["price_change_pct"]) >= ai_filter.get("min_price_deviation", self.ai_min_deviation) * 1.5
+            print(
+                f"  [2] 强方向要求: {'✓' if strong_direction_ok else '✗'} (需要: {require_strong_direction})"
+            )
+            if not strong_direction_ok:
+                print("=" * 60)
+                print(f"信号跳过 - 强方向要求不满足")
+                print("=" * 60)
+                return False
 
         # 3. 预测偏离度检查
-        price_deviation_pct = self.ai_min_deviation
+        price_deviation_pct = ai_filter.get("min_price_deviation", self.ai_min_deviation)
         deviation_ok = abs(signal["price_change_pct"]) >= price_deviation_pct
         print(
             f"  [3] 预测偏离度: {abs(signal['price_change_pct'])*100:.2f}% {'✓' if deviation_ok else '✗'} {price_deviation_pct*100}%"
@@ -1851,31 +2776,32 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 4. 资金费率检查（使用GUI设置的参数）
-        funding_ok = self.min_funding <= funding_rate <= self.max_funding
+        # 4. 资金费率检查（使用策略配置的参数，如果没有则使用GUI设置）
+        max_funding = special_filters.get("max_funding_rate", self.max_funding)
+        min_funding = special_filters.get("min_funding_rate", self.min_funding)
+        funding_ok = min_funding <= funding_rate <= max_funding
         print(
-            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{self.min_funding*100:.2f}%, {self.max_funding*100:.2f}%]"
+            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{min_funding*100:.2f}%, {max_funding*100:.2f}%]"
         )
         if not funding_ok:
-            reason = "过高" if funding_rate > self.max_funding else "过低"
+            reason = "过高" if funding_rate > max_funding else "过低"
             print("=" * 60)
             print(f"信号跳过 - 资金费率{reason}")
             print("=" * 60)
             return False
 
+        # 5. 市场状态过滤（震荡市禁止）
+        if market_state == "ranging" and special_filters.get("forbid_in_range", False):
+            print(f"  [5] 市场状态: {market_state} {'✗' if market_state == 'ranging' else '✓'} (震荡市禁止: {special_filters.get('forbid_in_range', False)})")
+            print("=" * 60)
+            print(f"信号跳过 - 震荡市场，禁止趋势交易")
+            print("=" * 60)
+            return False
+        print(f"  [5] 市场状态: {market_state} ✓")
+
         print("-" * 60)
         print("  ✓ 所有入场条件检查通过")
         print("=" * 60)
-
-        # 市场状态过滤
-        if is_alpha_signal:
-            if (
-                market_state == "ranging"
-                and "forbid_in_range" in special_filters
-                and special_filters["forbid_in_range"]
-            ):
-                print(f"震荡市场({market_state})，禁止趋势交易")
-                return False
 
         # 趋势爆发策略：只要趋势方向明确就开仓，不需要等突破
         print(f"触发趋势{signal['trend_direction']}: 趋势方向明确")
@@ -1889,7 +2815,7 @@ class ProfessionalTradingStrategy:
 
     def _check_range_entry(self, signal, df, current_price, funding_rate):
         ai_filter = self.strategy_profile["ai_filter"]
-        self.strategy_profile.get("special_filters", {})
+        special_filters = self.strategy_profile.get("special_filters", {})
 
         effective_threshold = self.threshold
 
@@ -1898,9 +2824,10 @@ class ProfessionalTradingStrategy:
         print("-" * 60)
 
         # 1. 震荡市检查（趋势强度不能太大）
-        range_ok = signal["trend_strength"] <= effective_threshold
+        range_max_threshold = ai_filter.get("max_trend_strength", effective_threshold)
+        range_ok = signal["trend_strength"] <= range_max_threshold
         print(
-            f"  [1] 震荡市检查: 趋势强度 {signal['trend_strength']:.4f} {'✓' if range_ok else '✗'} <= {effective_threshold}"
+            f"  [1] 震荡市检查: 趋势强度 {signal['trend_strength']:.4f} {'✓' if range_ok else '✗'} <= {range_max_threshold}"
         )
         if not range_ok:
             print("=" * 60)
@@ -1908,19 +2835,11 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 2. AI最小趋势强度检查
-        ai_trend_ok = signal["trend_strength"] >= self.ai_min_trend
-        print(
-            f"  [2] AI趋势强度: {signal['trend_strength']:.4f} {'✓' if ai_trend_ok else '✗'} 最小要求 {self.ai_min_trend}"
-        )
-        if not ai_trend_ok:
-            print("=" * 60)
-            print(f"信号跳过 - AI趋势强度不满足")
-            print("=" * 60)
-            return False
+        # 2. 震荡市不要求AI趋势强度 - 只要在震荡区间就可以交易
+        print(f"  [2] 震荡市模式: 跳过AI趋势强度要求")
 
         # 3. 预测偏离度检查
-        price_deviation_pct = self.ai_min_deviation
+        price_deviation_pct = ai_filter.get("min_price_deviation", self.ai_min_deviation)
         deviation_ok = abs(signal["price_change_pct"]) >= price_deviation_pct
         print(
             f"  [3] 预测偏离度: {abs(signal['price_change_pct'])*100:.2f}% {'✓' if deviation_ok else '✗'} {price_deviation_pct*100}%"
@@ -1931,13 +2850,15 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 4. 资金费率检查
-        funding_ok = self.min_funding <= funding_rate <= self.max_funding
+        # 4. 资金费率检查（使用策略配置的参数，如果没有则使用GUI设置）
+        max_funding = special_filters.get("max_funding_rate", self.max_funding)
+        min_funding = special_filters.get("min_funding_rate", self.min_funding)
+        funding_ok = min_funding <= funding_rate <= max_funding
         print(
-            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{self.min_funding*100:.2f}%, {self.max_funding*100:.2f}%]"
+            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{min_funding*100:.2f}%, {max_funding*100:.2f}%]"
         )
         if not funding_ok:
-            reason = "过高" if funding_rate > self.max_funding else "过低"
+            reason = "过高" if funding_rate > max_funding else "过低"
             print("=" * 60)
             print(f"信号跳过 - 资金费率{reason}")
             print("=" * 60)
@@ -1957,26 +2878,53 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 6. 价格位置检查 - 震荡套利：只要在震荡市就根据方向开仓
+        # 6. 价格位置检查 - 检查价格是否在区间的极端位置
         mid_price = (signal["pred_support"] + signal["pred_resistance"]) / 2
-        distance_from_mid = (current_price - mid_price) / mid_price
-
-        print(f"  [6] 震荡区间:")
+        price_range = signal["pred_resistance"] - signal["pred_support"]
+        price_at_extreme_pct = ai_filter.get("price_at_extreme_pct", 0.20)
+        
+        # 计算价格在区间的位置 (0 = 支撑位, 1 = 阻力位)
+        if price_range > 0:
+            position_in_range = (current_price - signal["pred_support"]) / price_range
+        else:
+            position_in_range = 0.5
+        
+        # 检查是否在极端位置
+        is_at_extreme = False
+        extreme_side = ""
+        if signal["trend_direction"] == "LONG":
+            # 做多时，价格应该在支撑位附近（区间下半部分）
+            is_at_extreme = position_in_range <= price_at_extreme_pct
+            extreme_side = "支撑位"
+        elif signal["trend_direction"] == "SHORT":
+            # 做空时，价格应该在阻力位附近（区间上半部分）
+            is_at_extreme = position_in_range >= (1 - price_at_extreme_pct)
+            extreme_side = "阻力位"
+        
+        print(f"  [6] 价格位置检查:")
         print(f"      支撑位: ${signal['pred_support']:.2f}")
         print(f"      中间位: ${mid_price:.2f}")
         print(f"      当前价: ${current_price:.2f}")
         print(f"      阻力位: ${signal['pred_resistance']:.2f}")
-        print(f"      偏离中间: {distance_from_mid*100:.2f}%")
+        print(f"      价格在区间位置: {position_in_range*100:.1f}%")
+        print(f"      极端位置阈值: {price_at_extreme_pct*100:.0f}%")
+        print(f"      是否在{extreme_side}附近: {'✓' if is_at_extreme else '✗'}")
+        
+        if not is_at_extreme and signal["trend_direction"] in ["LONG", "SHORT"]:
+            print("=" * 60)
+            print(f"信号跳过 - 价格不在{extreme_side}附近")
+            print("=" * 60)
+            return False
 
-        # 震荡套利：只要趋势强度低（震荡市），就根据预测方向开仓
+        # 震荡套利：只要趋势强度低（震荡市）且价格在极端位置，就根据预测方向开仓
         print(f"  ✓ 震荡市交易机会")
         print(f"  触发震荡{signal['trend_direction']}: 震荡市根据方向开仓")
         print("=" * 60)
         return True
 
     def _check_breakout_entry(self, signal, df, current_price, funding_rate):
-        self.strategy_profile["ai_filter"]
-        self.strategy_profile.get("special_filters", {})
+        ai_filter = self.strategy_profile["ai_filter"]
+        special_filters = self.strategy_profile.get("special_filters", {})
 
         effective_threshold = self.threshold
 
@@ -1984,10 +2932,11 @@ class ProfessionalTradingStrategy:
         print("消息突破入场条件检查:")
         print("-" * 60)
 
-        # 1. 趋势强度检查
-        trend_ok = signal["trend_strength"] >= effective_threshold
+        # 1. 趋势强度检查（使用策略配置的最小趋势强度）
+        trend_min_threshold = ai_filter.get("min_trend_strength", self.ai_min_trend)
+        trend_ok = signal["trend_strength"] >= trend_min_threshold
         print(
-            f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} >= {effective_threshold}"
+            f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} 最小要求 {trend_min_threshold}"
         )
         if not trend_ok:
             print("=" * 60)
@@ -1995,19 +2944,21 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 2. AI最小趋势强度检查
-        ai_trend_ok = signal["trend_strength"] >= self.ai_min_trend
-        print(
-            f"  [2] AI趋势强度: {signal['trend_strength']:.4f} {'✓' if ai_trend_ok else '✗'} 最小要求 {self.ai_min_trend}"
-        )
-        if not ai_trend_ok:
-            print("=" * 60)
-            print(f"信号跳过 - AI趋势强度不满足")
-            print("=" * 60)
-            return False
+        # 2. 连续预测确认检查
+        require_consecutive = self.require_consecutive_prediction
+        if require_consecutive > 1:
+            consecutive_ok = True
+            print(
+                f"  [2] 连续预测确认: {'✓' if consecutive_ok else '✗'} (需要: {require_consecutive}次)"
+            )
+            if not consecutive_ok:
+                print("=" * 60)
+                print(f"信号跳过 - 连续预测确认不足")
+                print("=" * 60)
+                return False
 
         # 3. 预测偏离度检查
-        price_deviation_pct = self.ai_min_deviation
+        price_deviation_pct = ai_filter.get("min_price_deviation", self.ai_min_deviation)
         deviation_ok = abs(signal["price_change_pct"]) >= price_deviation_pct
         print(
             f"  [3] 预测偏离度: {abs(signal['price_change_pct'])*100:.2f}% {'✓' if deviation_ok else '✗'} {price_deviation_pct*100}%"
@@ -2018,24 +2969,44 @@ class ProfessionalTradingStrategy:
             print("=" * 60)
             return False
 
-        # 4. 资金费率检查
-        funding_ok = self.min_funding <= funding_rate <= self.max_funding
+        # 4. 资金费率检查（使用策略配置的参数，如果没有则使用GUI设置）
+        max_funding = special_filters.get("max_funding_rate", self.max_funding)
+        min_funding = special_filters.get("min_funding_rate", self.min_funding)
+        funding_ok = min_funding <= funding_rate <= max_funding
         print(
-            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{self.min_funding*100:.2f}%, {self.max_funding*100:.2f}%]"
+            f"  [4] 资金费率: {funding_rate*100:.6f}% {'✓' if funding_ok else '✗'} [{min_funding*100:.2f}%, {max_funding*100:.2f}%]"
         )
         if not funding_ok:
-            reason = "过高" if funding_rate > self.max_funding else "过低"
+            reason = "过高" if funding_rate > max_funding else "过低"
             print("=" * 60)
             print(f"信号跳过 - 资金费率{reason}")
             print("=" * 60)
             return False
 
-        # 5. 显示交易信息
-        print(f"  [5] 交易信息:")
+        # 5. 最小波动率检查（消息后）
+        min_volatility = special_filters.get("min_volatility_after_news", 0)
+        if min_volatility > 0:
+            recent_volatility = df['close'].pct_change().std()
+            volatility_ok = recent_volatility >= min_volatility
+            print(
+                f"  [5] 波动率检查: {recent_volatility*100:.2f}% {'✓' if volatility_ok else '✗'} >= {min_volatility*100}%"
+            )
+            if not volatility_ok:
+                print("=" * 60)
+                print(f"信号跳过 - 波动率不足")
+                print("=" * 60)
+                return False
+
+        # 6. 显示交易信息
+        print(f"  [6] 交易信息:")
         print(f"      支撑位: ${signal['pred_support']:.2f}")
         print(f"      当前价: ${current_price:.2f}")
         print(f"      阻力位: ${signal['pred_resistance']:.2f}")
         print(f"      方向: {signal['trend_direction']}")
+
+        print("-" * 60)
+        print("  ✓ 所有入场条件检查通过")
+        print("=" * 60)
 
         # 消息突破策略：只要趋势强度够就直接开仓
         print(f"  ✓ 触发消息{signal['trend_direction']}: 趋势强度足够")
@@ -2109,6 +3080,583 @@ class ProfessionalTradingStrategy:
                 elapsed += sleep_chunk
 
 
+
+    def _save_backtest_state(self):
+        """保存回测前的策略状态"""
+        return {
+            'current_position': self.current_position,
+            'position_entry_price': self.position_entry_price,
+            'position_size': self.position_size,
+            'consecutive_reverse_count': self.consecutive_reverse_count,
+            'last_reverse_signal': self.last_reverse_signal,
+            'consecutive_entry_count': self.consecutive_entry_count,
+            'last_entry_signal': self.last_entry_signal,
+            'post_entry_time': self.post_entry_time,
+            'post_entry_entry_count': self.post_entry_entry_count,
+            '_last_had_position': self._last_had_position,
+            'daily_pnl': self.daily_pnl,
+            'daily_trades': self.daily_trades,
+            'consecutive_losses': self.consecutive_losses,
+            'current_balance': self.current_balance,
+            'peak_balance': self.peak_balance,
+            'max_drawdown': self.max_drawdown,
+            'trade_history': self.trade_history.copy() if hasattr(self, 'trade_history') else [],
+            'last_trade_time': self.last_trade_time,
+            'current_effective_strategy': self.current_effective_strategy,
+            'stop_loss_price': self.stop_loss_price,
+            'take_profit_1_price': self.take_profit_1_price,
+            'take_profit_2_price': self.take_profit_2_price,
+            'tp1_hit': self.tp1_hit,
+        }
+
+    def _restore_backtest_state(self, state):
+        """恢复回测前的策略状态"""
+        self.current_position = state['current_position']
+        self.position_entry_price = state['position_entry_price']
+        self.position_size = state['position_size']
+        self.consecutive_reverse_count = state['consecutive_reverse_count']
+        self.last_reverse_signal = state['last_reverse_signal']
+        self.consecutive_entry_count = state['consecutive_entry_count']
+        self.last_entry_signal = state['last_entry_signal']
+        self.post_entry_time = state['post_entry_time']
+        self.post_entry_entry_count = state['post_entry_entry_count']
+        self._last_had_position = state['_last_had_position']
+        self.daily_pnl = state['daily_pnl']
+        self.daily_trades = state['daily_trades']
+        self.consecutive_losses = state['consecutive_losses']
+        self.current_balance = state['current_balance']
+        self.peak_balance = state['peak_balance']
+        self.max_drawdown = state['max_drawdown']
+        self.trade_history = state['trade_history']
+        self.last_trade_time = state['last_trade_time']
+        self.current_effective_strategy = state['current_effective_strategy']
+        self.stop_loss_price = state['stop_loss_price']
+        self.take_profit_1_price = state['take_profit_1_price']
+        self.take_profit_2_price = state['take_profit_2_price']
+        self.tp1_hit = state['tp1_hit']
+
+    def _reset_backtest_state(self, initial_capital):
+        """重置回测状态"""
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+        self.consecutive_entry_count = 0
+        self.last_entry_signal = None
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        self._last_had_position = False
+        self.daily_pnl = 0.0
+        self.daily_trades = 0
+        self.consecutive_losses = 0
+        self.current_balance = initial_capital
+        self.peak_balance = initial_capital
+        self.max_drawdown = 0.0
+        self.trade_history = []
+        self.last_trade_time = None
+        self.current_effective_strategy = "auto"
+        # 重置止盈止损相关变量
+        self.stop_loss_price = None
+        self.take_profit_1_price = None
+        self.take_profit_2_price = None
+        self.tp1_hit = False
+
+    def run_backtest(self, df_historical, initial_capital=10000, fee_rate=0.001, slippage=0.0005, progress_callback=None, log_callback=None, stop_event=None):
+        """
+        运行完整回测 - 完全和真实交易一致
+        
+        Args:
+            df_historical: 历史K线数据 DataFrame
+            initial_capital: 初始资金
+            fee_rate: 手续费率
+            slippage: 滑点
+            progress_callback: 进度回调函数
+            log_callback: 日志回调函数
+            stop_event: 停止事件对象（threading.Event）
+            
+        Returns:
+            dict: 回测结果
+        """
+        from datetime import datetime, timedelta
+        
+        original_state = self._save_backtest_state()
+        
+        try:
+            self._reset_backtest_state(initial_capital)
+            
+            backtest_trades = []
+            equity_curve = [initial_capital]
+            total_fees = 0
+            
+            lookback = 100
+            total_candles = len(df_historical)
+            
+            if log_callback:
+                log_callback(f"[回测] 开始回测，共 {total_candles - lookback} 根K线")
+            
+            for i in range(lookback, total_candles):
+                if stop_event and stop_event.is_set():
+                    if log_callback:
+                        log_callback(f"[回测] 用户停止回测")
+                    break
+                
+                if progress_callback:
+                    progress = int((i - lookback) / (total_candles - lookback) * 100)
+                    progress_callback(progress)
+                
+                df_slice = df_historical.iloc[:i+1].copy()
+                current_price = df_slice['close'].iloc[-1]
+                candle_time = df_slice['timestamps'].iloc[-1] if 'timestamps' in df_slice.columns else datetime.now()
+                
+                try:
+                    action, action_reason, trade_info, log_messages = self._backtest_run_once(
+                        df_slice, current_price, candle_time, fee_rate, slippage
+                    )
+                    
+                    if log_callback and log_messages:
+                        for msg in log_messages:
+                            log_callback(msg)
+                    
+                    if action and trade_info:
+                        backtest_trades.append(trade_info)
+                        if trade_info.get('fee'):
+                            total_fees += trade_info['fee']
+                    
+                    equity_curve.append(self.current_balance)
+                    
+                except Exception as e:
+                    continue
+            
+            results = self._calculate_backtest_metrics(
+                backtest_trades, equity_curve, initial_capital, total_fees
+            )
+            
+            return results
+            
+        finally:
+            self._restore_backtest_state(original_state)
+
+    def _backtest_run_once(self, df, current_price, candle_time, fee_rate, slippage):
+        """回测的单次运行 - 完全和真实交易的run_once一致"""
+        from datetime import datetime, timedelta
+        
+        action = False
+        action_reason = ""
+        trade_info = {}
+        log_messages = []
+        
+        def log_msg(msg):
+            log_messages.append(msg)
+        
+        funding_rate = 0.0
+        
+        if self.current_position:
+            self._last_had_position = True
+            
+            position_pnl_pct = 0
+            if self.position_entry_price and current_price:
+                if self.current_position == "LONG":
+                    position_pnl_pct = (current_price - self.position_entry_price) / self.position_entry_price * 100
+                else:
+                    position_pnl_pct = (self.position_entry_price - current_price) / self.position_entry_price * 100
+            
+            should_close = False
+            should_add = False
+            close_reason = ""
+            
+            # 1. 检查固定止损
+            if self.current_position == "LONG":
+                if self.stop_loss_price and current_price <= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            else:
+                if self.stop_loss_price and current_price >= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            
+            # 2. 检查固定止盈1和止盈2（简化版：不做部分平仓，直接全部平仓）
+            if not should_close:
+                if self.current_position == "LONG":
+                    if not self.tp1_hit and self.take_profit_1_price and current_price >= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price >= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+                else:
+                    if not self.tp1_hit and self.take_profit_1_price and current_price <= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price <= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+            
+            try:
+                signal = self.analyzer.get_enhanced_signal(df)
+            except:
+                return action, action_reason, trade_info, log_messages
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            if self.post_entry_time:
+                if hasattr(candle_time, 'timestamp'):
+                    hours_since_entry = (candle_time - self.post_entry_time).total_seconds() / 3600
+                else:
+                    hours_since_entry = 0
+                
+                if hours_since_entry < self.post_entry_hours:
+                    is_same_direction = (
+                        (self.current_position == "LONG" and signal["trend_direction"] == "LONG") or
+                        (self.current_position == "SHORT" and signal["trend_direction"] == "SHORT")
+                    )
+                    
+                    if is_same_direction:
+                        self.post_entry_entry_count += 1
+                        if self.post_entry_entry_count >= 2:
+                            should_add = True
+                    else:
+                        self.post_entry_entry_count = 0
+                else:
+                    if position_pnl_pct >= self.take_profit_min_pct:
+                        should_close = True
+                        close_reason = f"超过{self.post_entry_hours}小时且盈利{position_pnl_pct:.2f}% > {self.take_profit_min_pct}%"
+            
+            if not should_close and self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
+                if "short" == self.last_reverse_signal:
+                    self.consecutive_reverse_count += 1
+                    if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                        should_close = True
+                        if has_strong_signal:
+                            if has_turning_point:
+                                close_reason = "强烈拐点检测做空（连续确认）"
+                            else:
+                                close_reason = "强趋势反转做空（连续确认）"
+                        else:
+                            close_reason = "趋势反转做空（连续确认）"
+                else:
+                    self.consecutive_reverse_count = 1
+                    self.last_reverse_signal = "short"
+            elif not should_close and self.current_position == "SHORT" and signal["trend_direction"] == "LONG":
+                if "long" == self.last_reverse_signal:
+                    self.consecutive_reverse_count += 1
+                    if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                        should_close = True
+                        if has_strong_signal:
+                            if has_turning_point:
+                                close_reason = "强烈拐点检测做多（连续确认）"
+                            else:
+                                close_reason = "强趋势反转做多（连续确认）"
+                        else:
+                            close_reason = "趋势反转做多（连续确认）"
+                else:
+                    self.consecutive_reverse_count = 1
+                    self.last_reverse_signal = "long"
+            
+            if not should_close and position_pnl_pct < -3:
+                should_close = True
+                close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
+            
+            if not should_close and not should_add and (
+                position_pnl_pct > 1
+                and signal["trend_strength"] > self.threshold
+            ):
+                if (
+                    self.current_position == "LONG"
+                    and signal["trend_direction"] == "LONG"
+                ) or (
+                    self.current_position == "SHORT"
+                    and signal["trend_direction"] == "SHORT"
+                ):
+                    should_add = True
+            
+            if should_close:
+                action = True
+                action_reason = close_reason
+                log_msg(f"[平仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - {close_reason}")
+                trade_info = self._simulate_close_position(current_price, candle_time, close_reason, fee_rate, slippage)
+                if trade_info:
+                    log_msg(f"[平仓完成] 盈亏: {trade_info['pnl']:+.2f} ({trade_info['pnl_pct']:+.2f}%), 手续费: {trade_info['fee']:.2f}")
+            
+        else:
+            if self._last_had_position:
+                self._reset_full_state()
+            else:
+                self._reset_position_only()
+            
+            self._last_had_position = False
+            
+            risk_ok, risk_msg = self.check_risk_limits()
+            self.last_risk_msg = risk_msg
+            if not risk_ok:
+                can_open_position = False
+            else:
+                can_open_position = True
+            
+            if not can_open_position:
+                return action, action_reason, trade_info, log_messages
+            
+            in_active_hours = True
+            
+            if self.risk_manager and len(df) >= 100:
+                try:
+                    volatility_ok, volatility_msg = self.risk_manager.check_market_volatility_risk(df)
+                except:
+                    volatility_ok = True
+            
+            self._adaptive_parameter_optimization(df)
+            
+            extreme_ok = True
+            if len(df) >= 2:
+                prev_close = df['close'].iloc[-2]
+                change_pct = (current_price - prev_close) / prev_close * 100
+                if abs(change_pct) > 5:
+                    extreme_ok = False
+                    can_open_position = False
+            
+            if not can_open_position:
+                return action, action_reason, trade_info, log_messages
+            
+            try:
+                signal = self.analyzer.get_enhanced_signal(df)
+            except:
+                return action, action_reason, trade_info, log_messages
+            
+            signal_valid = signal.get("signal_valid", True)
+            
+            if not signal_valid:
+                self.consecutive_entry_count = 0
+                self.last_entry_signal = None
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_direction"] not in ["LONG", "SHORT"]:
+                return action, action_reason, trade_info, log_messages
+            
+            effective_strategy = self._determine_effective_strategy(df, signal)
+            if effective_strategy != self.current_effective_strategy:
+                self.current_effective_strategy = effective_strategy
+                self.strategy_profile = StrategyProfiles.get_profile(effective_strategy)
+            
+            effective_strategy = self.current_effective_strategy
+            
+            if signal.get("signal_valid", True):
+                if effective_strategy == "trend":
+                    try:
+                        signal["signal_valid"] = self._check_trend_entry(signal, df, current_price, funding_rate)
+                    except:
+                        signal["signal_valid"] = True
+                elif effective_strategy == "range":
+                    try:
+                        signal["signal_valid"] = self._check_range_entry(signal, df, current_price, funding_rate)
+                    except:
+                        signal["signal_valid"] = True
+                elif effective_strategy == "breakout":
+                    try:
+                        signal["signal_valid"] = self._check_breakout_entry(signal, df, current_price, funding_rate)
+                    except:
+                        signal["signal_valid"] = True
+            
+            if not signal.get("signal_valid", True):
+                return action, action_reason, trade_info, log_messages
+            
+            entry_ok = True
+            try:
+                entry_ok, entry_msg = self.check_entry_conditions(signal, df, funding_rate)
+            except:
+                pass
+            
+            if not entry_ok:
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_strength"] < self.threshold:
+                return action, action_reason, trade_info, log_messages
+            
+            if self.last_trade_time:
+                if hasattr(candle_time, 'timestamp') and hasattr(self.last_trade_time, 'timestamp'):
+                    minutes_since_trade = (candle_time - self.last_trade_time).total_seconds() / 60
+                    if minutes_since_trade < 10:
+                        return action, action_reason, trade_info, log_messages
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            current_entry_signal = signal["trend_direction"]
+            
+            if current_entry_signal == self.last_entry_signal:
+                self.consecutive_entry_count += 1
+                
+                if self.consecutive_entry_count >= self.entry_confirm_count:
+                    action = True
+                    action_reason = "开仓信号确认"
+                    log_msg(f"[开仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 方向: {signal['trend_direction']}, 趋势强度: {signal_strength:.4f}")
+                    trade_info = self._simulate_open_position(
+                        signal, current_price, candle_time, fee_rate, slippage
+                    )
+                    if trade_info:
+                        log_msg(f"[开仓完成] 价格: {trade_info['price']:.2f}, 数量: {trade_info['size']:.4f}, 手续费: {trade_info['fee']:.2f}")
+                    self.last_trade_time = candle_time
+                    self.consecutive_entry_count = 0
+                    self.last_entry_signal = None
+            else:
+                self.consecutive_entry_count = 1
+                self.last_entry_signal = current_entry_signal
+        
+        return action, action_reason, trade_info, log_messages
+
+    def _simulate_open_position(self, signal, price, time, fee_rate, slippage):
+        """模拟开仓"""
+        direction = signal["trend_direction"]
+        
+        slippage_price = price * (1 + slippage) if direction == "LONG" else price * (1 - slippage)
+        
+        position_size = (self.current_balance * 0.1) / slippage_price
+        position_size = max(position_size, 0.001)
+        
+        fee = slippage_price * position_size * fee_rate
+        
+        self.current_position = direction
+        self.position_entry_price = slippage_price
+        self.position_size = position_size
+        self.post_entry_time = time
+        self.post_entry_entry_count = 0
+        
+        # 设置止盈止损价格（优先使用 AI 推荐值）
+        if "ai_stop_loss" in signal and "ai_take_profit_1" in signal:
+            self.stop_loss_price = signal["ai_stop_loss"]
+            self.take_profit_1_price = signal["ai_take_profit_1"]
+            self.take_profit_2_price = signal.get("ai_take_profit_2", None)
+        else:
+            # 备选方案：使用默认值
+            if direction == "LONG":
+                self.stop_loss_price = slippage_price * 0.985  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 1.012  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 1.025  # 止盈2 2.5%
+            else:
+                self.stop_loss_price = slippage_price * 1.015  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 0.988  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 0.975  # 止盈2 2.5%
+        
+        self.tp1_hit = False
+        
+        trade_info = {
+            "type": "OPEN",
+            "direction": direction,
+            "price": slippage_price,
+            "size": position_size,
+            "fee": fee,
+            "time": time,
+            "reason": "开仓"
+        }
+        
+        self.trade_history.append(trade_info)
+        self.current_balance -= fee
+        
+        return trade_info
+
+    def _simulate_close_position(self, price, time, reason, fee_rate, slippage):
+        """模拟平仓"""
+        direction = self.current_position
+        
+        slippage_price = price * (1 - slippage) if direction == "LONG" else price * (1 + slippage)
+        
+        if direction == "LONG":
+            pnl = (slippage_price - self.position_entry_price) * self.position_size
+        else:
+            pnl = (self.position_entry_price - slippage_price) * self.position_size
+        
+        fee = slippage_price * self.position_size * fee_rate
+        
+        self.current_balance += pnl - fee
+        
+        trade_info = {
+            "type": "CLOSE",
+            "direction": direction,
+            "entry_price": self.position_entry_price,
+            "exit_price": slippage_price,
+            "size": self.position_size,
+            "pnl": pnl,
+            "pnl_pct": (pnl / (self.position_entry_price * self.position_size)) * 100 if self.position_entry_price else 0,
+            "fee": fee,
+            "time": time,
+            "reason": reason
+        }
+        
+        self.trade_history.append(trade_info)
+        
+        if self.peak_balance < self.current_balance:
+            self.peak_balance = self.current_balance
+        
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance if self.peak_balance > 0 else 0
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+        
+        if pnl > 0:
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+        
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        
+        return trade_info
+
+    def _calculate_backtest_metrics(self, trades, equity_curve, initial_capital, total_fees):
+        """计算回测指标"""
+        import numpy as np
+        
+        closed_trades = [t for t in trades if t['type'] == 'CLOSE']
+        
+        total_trades = len(closed_trades)
+        win_trades = len([t for t in closed_trades if t['pnl'] > 0])
+        loss_trades = len([t for t in closed_trades if t['pnl'] <= 0])
+        
+        win_rate = win_trades / total_trades if total_trades > 0 else 0
+        
+        total_pnl = sum(t['pnl'] for t in closed_trades)
+        total_return = total_pnl / initial_capital if initial_capital > 0 else 0
+        
+        avg_win = np.mean([t['pnl'] for t in closed_trades if t['pnl'] > 0]) if win_trades > 0 else 0
+        avg_loss = np.mean([abs(t['pnl']) for t in closed_trades if t['pnl'] <= 0]) if loss_trades > 0 else 0
+        profit_factor = (avg_win * win_trades) / (avg_loss * loss_trades) if (avg_loss > 0 and loss_trades > 0) else float('inf')
+        
+        max_drawdown = self.max_drawdown
+        
+        avg_profit_pct = np.mean([t['pnl_pct'] for t in closed_trades]) if total_trades > 0 else 0
+        
+        return {
+            "trades": trades,
+            "closed_trades": closed_trades,
+            "equity_curve": equity_curve,
+            "initial_capital": initial_capital,
+            "final_capital": self.current_balance,
+            "total_return": total_return,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "total_trades": total_trades,
+            "win_trades": win_trades,
+            "loss_trades": loss_trades,
+            "avg_profit": avg_profit_pct,
+            "total_fees": total_fees
+        }
+
 class EnhancedRiskManager:
     """增强型风险管理器 - 提供多层次的风险控制"""
 
@@ -2121,6 +3669,13 @@ class EnhancedRiskManager:
         self.peak_balance = initial_balance
         self.risk_level = "NORMAL"  # NORMAL, CAUTIOUS, AGGRESSIVE
         self.market_volatility = "NORMAL"
+
+        # 策略配置参数（从面板配置中加载）
+        self.single_trade_risk = 0.029  # 单笔交易风险
+        self.daily_loss_limit = 0.12  # 单日亏损限制
+        self.max_consecutive_losses = 6  # 最大连续亏损
+        self.max_single_position = 0.29  # 最大单笔仓位
+        self.max_daily_position = 0.85  # 最大日仓位
 
         # 风险参数配置
         self.risk_params = {
@@ -2322,3 +3877,929 @@ class EnhancedRiskManager:
             self.risk_level = "NORMAL"
 
         return self.risk_level
+
+    def _save_backtest_state(self):
+        """保存回测前的策略状态"""
+        return {
+            'current_position': self.current_position,
+            'position_entry_price': self.position_entry_price,
+            'position_size': self.position_size,
+            'consecutive_reverse_count': self.consecutive_reverse_count,
+            'last_reverse_signal': self.last_reverse_signal,
+            'consecutive_entry_count': self.consecutive_entry_count,
+            'last_entry_signal': self.last_entry_signal,
+            'post_entry_time': self.post_entry_time,
+            'post_entry_entry_count': self.post_entry_entry_count,
+            '_last_had_position': self._last_had_position,
+            'daily_pnl': self.daily_pnl,
+            'daily_trades': self.daily_trades,
+            'consecutive_losses': self.consecutive_losses,
+            'current_balance': self.current_balance,
+            'peak_balance': self.peak_balance,
+            'max_drawdown': self.max_drawdown,
+            'trade_history': self.trade_history.copy() if hasattr(self, 'trade_history') else [],
+        }
+
+    def _restore_backtest_state(self, state):
+        """恢复回测前的策略状态"""
+        self.current_position = state['current_position']
+        self.position_entry_price = state['position_entry_price']
+        self.position_size = state['position_size']
+        self.consecutive_reverse_count = state['consecutive_reverse_count']
+        self.last_reverse_signal = state['last_reverse_signal']
+        self.consecutive_entry_count = state['consecutive_entry_count']
+        self.last_entry_signal = state['last_entry_signal']
+        self.post_entry_time = state['post_entry_time']
+        self.post_entry_entry_count = state['post_entry_entry_count']
+        self._last_had_position = state['_last_had_position']
+        self.daily_pnl = state['daily_pnl']
+        self.daily_trades = state['daily_trades']
+        self.consecutive_losses = state['consecutive_losses']
+        self.current_balance = state['current_balance']
+        self.peak_balance = state['peak_balance']
+        self.max_drawdown = state['max_drawdown']
+        self.trade_history = state['trade_history']
+
+    def _reset_backtest_state(self, initial_capital):
+        """重置回测状态"""
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+        self.consecutive_entry_count = 0
+        self.last_entry_signal = None
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        self._last_had_position = False
+        self.daily_pnl = 0.0
+        self.daily_trades = 0
+        self.consecutive_losses = 0
+        self.current_balance = initial_capital
+        self.peak_balance = initial_capital
+        self.max_drawdown = 0.0
+        self.trade_history = []
+
+    def run_backtest(self, df_historical, initial_capital=10000, fee_rate=0.001, slippage=0.0005, progress_callback=None):
+        """
+        运行完整回测
+        
+        Args:
+            df_historical: 历史K线数据 DataFrame
+            initial_capital: 初始资金
+            fee_rate: 手续费率
+            slippage: 滑点
+            progress_callback: 进度回调函数
+            
+        Returns:
+            dict: 回测结果
+        """
+        from datetime import datetime, timedelta
+        
+        print(f"\n{'='*80}")
+        print("开始策略回测")
+        print(f"{'='*80}")
+        
+        original_state = self._save_backtest_state()
+        
+        try:
+            self._reset_backtest_state(initial_capital)
+            
+            backtest_trades = []
+            equity_curve = [initial_capital]
+            total_fees = 0
+            
+            lookback = 100
+            total_candles = len(df_historical)
+            
+            for i in range(lookback, total_candles):
+                if progress_callback:
+                    progress = int((i - lookback) / (total_candles - lookback) * 100)
+                    progress_callback(progress)
+                
+                df_slice = df_historical.iloc[:i+1].copy()
+                current_price = df_slice['close'].iloc[-1]
+                candle_time = df_slice['timestamps'].iloc[-1] if 'timestamps' in df_slice.columns else datetime.now()
+                
+                try:
+                    signal = self.analyzer.get_enhanced_signal(df_slice)
+                    
+                    action, action_reason, trade_info = self._simulate_trading_decision(
+                        df_slice, signal, current_price, candle_time, fee_rate, slippage
+                    )
+                    
+                    if action:
+                        backtest_trades.append(trade_info)
+                        if trade_info.get('fee'):
+                            total_fees += trade_info['fee']
+                    
+                    equity_curve.append(self.current_balance)
+                    
+                except Exception as e:
+                    print(f"[回测错误] 第{i}根K线: {e}")
+                    continue
+            
+            results = self._calculate_backtest_metrics(
+                backtest_trades, equity_curve, initial_capital, total_fees
+            )
+            
+            print(f"\n{'='*80}")
+            print("回测完成！")
+            print(f"总收益率: {results['total_return']:.2%}")
+            print(f"胜率: {results['win_rate']:.2%}")
+            print(f"总交易次数: {results['total_trades']}")
+            print(f"{'='*80}\n")
+            
+            return results
+            
+        finally:
+            self._restore_backtest_state(original_state)
+
+    def _simulate_trading_decision(self, df, signal, current_price, candle_time, fee_rate, slippage):
+        """模拟交易决策 - 完全和主程序一致"""
+        action = False
+        action_reason = ""
+        trade_info = {}
+        
+        if self.current_position:
+            self._last_had_position = True
+            
+            position_pnl_pct = 0
+            if self.position_entry_price and current_price:
+                if self.current_position == "LONG":
+                    position_pnl_pct = (current_price - self.position_entry_price) / self.position_entry_price * 100
+                else:
+                    position_pnl_pct = (self.position_entry_price - current_price) / self.position_entry_price * 100
+            
+            should_close = False
+            should_add = False
+            close_reason = ""
+            
+            # 1. 检查固定止损
+            if self.current_position == "LONG":
+                if self.stop_loss_price and current_price <= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            else:
+                if self.stop_loss_price and current_price >= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            
+            # 2. 检查固定止盈1和止盈2（简化版：不做部分平仓，直接全部平仓）
+            if not should_close:
+                if self.current_position == "LONG":
+                    if not self.tp1_hit and self.take_profit_1_price and current_price >= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price >= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+                else:
+                    if not self.tp1_hit and self.take_profit_1_price and current_price <= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price <= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            if self.post_entry_time:
+                if hasattr(candle_time, 'timestamp'):
+                    hours_since_entry = (candle_time - self.post_entry_time).total_seconds() / 3600
+                else:
+                    hours_since_entry = 0
+                
+                if hours_since_entry < self.post_entry_hours:
+                    is_same_direction = (
+                        (self.current_position == "LONG" and signal["trend_direction"] == "LONG") or
+                        (self.current_position == "SHORT" and signal["trend_direction"] == "SHORT")
+                    )
+                    
+                    if is_same_direction:
+                        self.post_entry_entry_count += 1
+                        if self.post_entry_entry_count >= 2:
+                            should_add = True
+                    else:
+                        self.post_entry_entry_count = 0
+                else:
+                    if position_pnl_pct >= self.take_profit_min_pct:
+                        should_close = True
+                        close_reason = f"超过{self.post_entry_hours}小时且盈利{position_pnl_pct:.2f}% > {self.take_profit_min_pct}%"
+            
+            if not should_close:
+                if self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
+                    if "short" == self.last_reverse_signal:
+                        self.consecutive_reverse_count += 1
+                        if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                            should_close = True
+                            if has_strong_signal:
+                                if has_turning_point:
+                                    close_reason = "强烈拐点检测做空（连续确认）"
+                                else:
+                                    close_reason = "强趋势反转做空（连续确认）"
+                            else:
+                                close_reason = "趋势反转做空（连续确认）"
+                    else:
+                        self.consecutive_reverse_count = 1
+                        self.last_reverse_signal = "short"
+                elif self.current_position == "SHORT" and signal["trend_direction"] == "LONG":
+                    if "long" == self.last_reverse_signal:
+                        self.consecutive_reverse_count += 1
+                        if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                            should_close = True
+                            if has_strong_signal:
+                                if has_turning_point:
+                                    close_reason = "强烈拐点检测做多（连续确认）"
+                                else:
+                                    close_reason = "强趋势反转做多（连续确认）"
+                            else:
+                                close_reason = "趋势反转做多（连续确认）"
+                    else:
+                        self.consecutive_reverse_count = 1
+                        self.last_reverse_signal = "long"
+                else:
+                    pass
+            
+            if not should_close and position_pnl_pct < -3:
+                should_close = True
+                close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
+            
+            if not should_close and not should_add and (
+                position_pnl_pct > 1
+                and signal["trend_strength"] > self.threshold
+            ):
+                if (
+                    self.current_position == "LONG"
+                    and signal["trend_direction"] == "LONG"
+                ) or (
+                    self.current_position == "SHORT"
+                    and signal["trend_direction"] == "SHORT"
+                ):
+                    should_add = True
+            
+            if should_close:
+                action = True
+                action_reason = close_reason
+                log_msg(f"[平仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - {close_reason}")
+                trade_info = self._simulate_close_position(current_price, candle_time, close_reason, fee_rate, slippage)
+                if trade_info:
+                    log_msg(f"[平仓完成] 盈亏: {trade_info['pnl']:+.2f} ({trade_info['pnl_pct']:+.2f}%), 手续费: {trade_info['fee']:.2f}")
+            elif should_add:
+                pass
+            
+        else:
+            if self._last_had_position:
+                self._reset_full_state()
+            else:
+                self._reset_position_only()
+            
+            self._last_had_position = False
+            
+            signal_valid = signal.get("signal_valid", True)
+            
+            if not signal_valid:
+                self.consecutive_entry_count = 0
+                self.last_entry_signal = None
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_direction"] not in ["LONG", "SHORT"]:
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_strength"] < self.threshold:
+                return action, action_reason, trade_info, log_messages
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            current_entry_signal = signal["trend_direction"]
+            
+            if current_entry_signal == self.last_entry_signal:
+                self.consecutive_entry_count += 1
+                
+                if self.consecutive_entry_count >= self.entry_confirm_count:
+                    action = True
+                    action_reason = "开仓信号确认"
+                    log_msg(f"[开仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 方向: {signal['trend_direction']}, 趋势强度: {signal_strength:.4f}")
+                    trade_info = self._simulate_open_position(
+                        signal, current_price, candle_time, fee_rate, slippage
+                    )
+                    if trade_info:
+                        log_msg(f"[开仓完成] 价格: {trade_info['price']:.2f}, 数量: {trade_info['size']:.4f}, 手续费: {trade_info['fee']:.2f}")
+                    self.consecutive_entry_count = 0
+                    self.last_entry_signal = None
+            else:
+                self.consecutive_entry_count = 1
+                self.last_entry_signal = current_entry_signal
+        
+        return action, action_reason, trade_info, log_messages
+
+    def _simulate_open_position(self, signal, price, time, fee_rate, slippage):
+        """模拟开仓"""
+        direction = signal["trend_direction"]
+        
+        slippage_price = price * (1 + slippage) if direction == "LONG" else price * (1 - slippage)
+        
+        position_size = (self.current_balance * 0.1) / slippage_price
+        position_size = max(position_size, 0.001)
+        
+        fee = slippage_price * position_size * fee_rate
+        
+        self.current_position = direction
+        self.position_entry_price = slippage_price
+        self.position_size = position_size
+        self.post_entry_time = time
+        self.post_entry_entry_count = 0
+        
+        # 设置止盈止损价格（优先使用 AI 推荐值）
+        if "ai_stop_loss" in signal and "ai_take_profit_1" in signal:
+            self.stop_loss_price = signal["ai_stop_loss"]
+            self.take_profit_1_price = signal["ai_take_profit_1"]
+            self.take_profit_2_price = signal.get("ai_take_profit_2", None)
+        else:
+            # 备选方案：使用默认值
+            if direction == "LONG":
+                self.stop_loss_price = slippage_price * 0.985  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 1.012  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 1.025  # 止盈2 2.5%
+            else:
+                self.stop_loss_price = slippage_price * 1.015  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 0.988  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 0.975  # 止盈2 2.5%
+        
+        self.tp1_hit = False
+        
+        trade_info = {
+            "type": "OPEN",
+            "direction": direction,
+            "price": slippage_price,
+            "size": position_size,
+            "fee": fee,
+            "time": time,
+            "reason": "开仓"
+        }
+        
+        self.trade_history.append(trade_info)
+        self.current_balance -= fee
+        
+        return trade_info
+
+    def _simulate_close_position(self, price, time, reason, fee_rate, slippage):
+        """模拟平仓"""
+        direction = self.current_position
+        
+        slippage_price = price * (1 - slippage) if direction == "LONG" else price * (1 + slippage)
+        
+        if direction == "LONG":
+            pnl = (slippage_price - self.position_entry_price) * self.position_size
+        else:
+            pnl = (self.position_entry_price - slippage_price) * self.position_size
+        
+        fee = slippage_price * self.position_size * fee_rate
+        
+        self.current_balance += pnl - fee
+        
+        trade_info = {
+            "type": "CLOSE",
+            "direction": direction,
+            "entry_price": self.position_entry_price,
+            "exit_price": slippage_price,
+            "size": self.position_size,
+            "pnl": pnl,
+            "pnl_pct": (pnl / (self.position_entry_price * self.position_size)) * 100 if self.position_entry_price else 0,
+            "fee": fee,
+            "time": time,
+            "reason": reason
+        }
+        
+        self.trade_history.append(trade_info)
+        
+        if self.peak_balance < self.current_balance:
+            self.peak_balance = self.current_balance
+        
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance if self.peak_balance > 0 else 0
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+        
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        
+        return trade_info
+
+    def _calculate_backtest_metrics(self, trades, equity_curve, initial_capital, total_fees):
+        """计算回测指标"""
+        closed_trades = [t for t in trades if t['type'] == 'CLOSE']
+        
+        total_trades = len(closed_trades)
+        win_trades = len([t for t in closed_trades if t['pnl'] > 0])
+        loss_trades = len([t for t in closed_trades if t['pnl'] <= 0])
+        
+        win_rate = win_trades / total_trades if total_trades > 0 else 0
+        
+        total_pnl = sum(t['pnl'] for t in closed_trades)
+        total_return = total_pnl / initial_capital if initial_capital > 0 else 0
+        
+        avg_win = np.mean([t['pnl'] for t in closed_trades if t['pnl'] > 0]) if win_trades > 0 else 0
+        avg_loss = np.mean([abs(t['pnl']) for t in closed_trades if t['pnl'] <= 0]) if loss_trades > 0 else 0
+        profit_factor = (avg_win * win_trades) / (avg_loss * loss_trades) if (avg_loss > 0 and loss_trades > 0) else float('inf')
+        
+        max_drawdown = self.max_drawdown
+        
+        avg_profit_pct = np.mean([t['pnl_pct'] for t in closed_trades]) if total_trades > 0 else 0
+        
+        return {
+            "trades": trades,
+            "closed_trades": closed_trades,
+            "equity_curve": equity_curve,
+            "initial_capital": initial_capital,
+            "final_capital": self.current_balance,
+            "total_return": total_return,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "total_trades": total_trades,
+            "win_trades": win_trades,
+            "loss_trades": loss_trades,
+            "avg_profit": avg_profit_pct,
+            "total_fees": total_fees
+        }
+
+    def _save_backtest_state(self):
+        """保存回测前的策略状态"""
+        return {
+            'current_position': self.current_position,
+            'position_entry_price': self.position_entry_price,
+            'position_size': self.position_size,
+            'consecutive_reverse_count': self.consecutive_reverse_count,
+            'last_reverse_signal': self.last_reverse_signal,
+            'consecutive_entry_count': self.consecutive_entry_count,
+            'last_entry_signal': self.last_entry_signal,
+            'post_entry_time': self.post_entry_time,
+            'post_entry_entry_count': self.post_entry_entry_count,
+            '_last_had_position': self._last_had_position,
+            'daily_pnl': self.daily_pnl,
+            'daily_trades': self.daily_trades,
+            'consecutive_losses': self.consecutive_losses,
+            'current_balance': self.current_balance,
+            'peak_balance': self.peak_balance,
+            'max_drawdown': self.max_drawdown,
+            'trade_history': self.trade_history.copy() if hasattr(self, 'trade_history') else [],
+        }
+
+    def _restore_backtest_state(self, state):
+        """恢复回测前的策略状态"""
+        self.current_position = state['current_position']
+        self.position_entry_price = state['position_entry_price']
+        self.position_size = state['position_size']
+        self.consecutive_reverse_count = state['consecutive_reverse_count']
+        self.last_reverse_signal = state['last_reverse_signal']
+        self.consecutive_entry_count = state['consecutive_entry_count']
+        self.last_entry_signal = state['last_entry_signal']
+        self.post_entry_time = state['post_entry_time']
+        self.post_entry_entry_count = state['post_entry_entry_count']
+        self._last_had_position = state['_last_had_position']
+        self.daily_pnl = state['daily_pnl']
+        self.daily_trades = state['daily_trades']
+        self.consecutive_losses = state['consecutive_losses']
+        self.current_balance = state['current_balance']
+        self.peak_balance = state['peak_balance']
+        self.max_drawdown = state['max_drawdown']
+        self.trade_history = state['trade_history']
+
+    def _reset_backtest_state(self, initial_capital):
+        """重置回测状态"""
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.consecutive_reverse_count = 0
+        self.last_reverse_signal = None
+        self.consecutive_entry_count = 0
+        self.last_entry_signal = None
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        self._last_had_position = False
+        self.daily_pnl = 0.0
+        self.daily_trades = 0
+        self.consecutive_losses = 0
+        self.current_balance = initial_capital
+        self.peak_balance = initial_capital
+        self.max_drawdown = 0.0
+        self.trade_history = []
+
+    def run_backtest(self, df_historical, initial_capital=10000, fee_rate=0.001, slippage=0.0005, progress_callback=None):
+        """
+        运行完整回测
+        
+        Args:
+            df_historical: 历史K线数据 DataFrame
+            initial_capital: 初始资金
+            fee_rate: 手续费率
+            slippage: 滑点
+            progress_callback: 进度回调函数
+            
+        Returns:
+            dict: 回测结果
+        """
+        from datetime import datetime, timedelta
+        
+        print(f"\n{'='*80}")
+        print("开始策略回测")
+        print(f"{'='*80}")
+        
+        original_state = self._save_backtest_state()
+        
+        try:
+            self._reset_backtest_state(initial_capital)
+            
+            backtest_trades = []
+            equity_curve = [initial_capital]
+            total_fees = 0
+            
+            lookback = 100
+            total_candles = len(df_historical)
+            
+            for i in range(lookback, total_candles):
+                if progress_callback:
+                    progress = int((i - lookback) / (total_candles - lookback) * 100)
+                    progress_callback(progress)
+                
+                df_slice = df_historical.iloc[:i+1].copy()
+                current_price = df_slice['close'].iloc[-1]
+                candle_time = df_slice.index[-1] if hasattr(df_slice, 'index') else datetime.now()
+                
+                try:
+                    signal = self.analyzer.get_enhanced_signal(df_slice)
+                    
+                    action, action_reason, trade_info = self._simulate_trading_decision(
+                        df_slice, signal, current_price, candle_time, fee_rate, slippage
+                    )
+                    
+                    if action:
+                        backtest_trades.append(trade_info)
+                        if trade_info.get('fee'):
+                            total_fees += trade_info['fee']
+                    
+                    equity_curve.append(self.current_balance)
+                    
+                except Exception as e:
+                    print(f"[回测错误] 第{i}根K线: {e}")
+                    continue
+            
+            results = self._calculate_backtest_metrics(
+                backtest_trades, equity_curve, initial_capital, total_fees
+            )
+            
+            print(f"\n{'='*80}")
+            print("回测完成！")
+            print(f"总收益率: {results['total_return']:.2%}")
+            print(f"胜率: {results['win_rate']:.2%}")
+            print(f"总交易次数: {results['total_trades']}")
+            print(f"{'='*80}\n")
+            
+            return results
+            
+        finally:
+            self._restore_backtest_state(original_state)
+
+    def _simulate_trading_decision(self, df, signal, current_price, candle_time, fee_rate, slippage):
+        """模拟交易决策 - 完全和主程序一致"""
+        action = False
+        action_reason = ""
+        trade_info = {}
+        
+        if self.current_position:
+            self._last_had_position = True
+            
+            position_pnl_pct = 0
+            if self.position_entry_price and current_price:
+                if self.current_position == "LONG":
+                    position_pnl_pct = (current_price - self.position_entry_price) / self.position_entry_price * 100
+                else:
+                    position_pnl_pct = (self.position_entry_price - current_price) / self.position_entry_price * 100
+            
+            should_close = False
+            should_add = False
+            close_reason = ""
+            
+            # 1. 检查固定止损
+            if self.current_position == "LONG":
+                if self.stop_loss_price and current_price <= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            else:
+                if self.stop_loss_price and current_price >= self.stop_loss_price:
+                    should_close = True
+                    close_reason = "固定止损"
+                    log_msg(f"[止损] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止损价: ${self.stop_loss_price:.2f}")
+            
+            # 2. 检查固定止盈1和止盈2（简化版：不做部分平仓，直接全部平仓）
+            if not should_close:
+                if self.current_position == "LONG":
+                    if not self.tp1_hit and self.take_profit_1_price and current_price >= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price >= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+                else:
+                    if not self.tp1_hit and self.take_profit_1_price and current_price <= self.take_profit_1_price:
+                        should_close = True
+                        close_reason = "固定止盈1"
+                        log_msg(f"[止盈1] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈1价: ${self.take_profit_1_price:.2f}")
+                    elif self.tp1_hit and self.take_profit_2_price and current_price <= self.take_profit_2_price:
+                        should_close = True
+                        close_reason = "固定止盈2"
+                        log_msg(f"[止盈2] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 当前价格: ${current_price:.2f}, 止盈2价: ${self.take_profit_2_price:.2f}")
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            if self.post_entry_time:
+                if hasattr(candle_time, 'timestamp'):
+                    hours_since_entry = (candle_time - self.post_entry_time).total_seconds() / 3600
+                else:
+                    hours_since_entry = 0
+                
+                if hours_since_entry < self.post_entry_hours:
+                    is_same_direction = (
+                        (self.current_position == "LONG" and signal["trend_direction"] == "LONG") or
+                        (self.current_position == "SHORT" and signal["trend_direction"] == "SHORT")
+                    )
+                    
+                    if is_same_direction:
+                        self.post_entry_entry_count += 1
+                        if self.post_entry_entry_count >= 2:
+                            should_add = True
+                    else:
+                        self.post_entry_entry_count = 0
+                else:
+                    if position_pnl_pct >= self.take_profit_min_pct:
+                        should_close = True
+                        close_reason = f"超过{self.post_entry_hours}小时且盈利{position_pnl_pct:.2f}% > {self.take_profit_min_pct}%"
+            
+            if not should_close:
+                if self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
+                    if "short" == self.last_reverse_signal:
+                        self.consecutive_reverse_count += 1
+                        if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                            should_close = True
+                            if has_strong_signal:
+                                if has_turning_point:
+                                    close_reason = "强烈拐点检测做空（连续确认）"
+                                else:
+                                    close_reason = "强趋势反转做空（连续确认）"
+                            else:
+                                close_reason = "趋势反转做空（连续确认）"
+                    else:
+                        self.consecutive_reverse_count = 1
+                        self.last_reverse_signal = "short"
+                elif self.current_position == "SHORT" and signal["trend_direction"] == "LONG":
+                    if "long" == self.last_reverse_signal:
+                        self.consecutive_reverse_count += 1
+                        if self.consecutive_reverse_count >= self.reverse_confirm_count:
+                            should_close = True
+                            if has_strong_signal:
+                                if has_turning_point:
+                                    close_reason = "强烈拐点检测做多（连续确认）"
+                                else:
+                                    close_reason = "强趋势反转做多（连续确认）"
+                            else:
+                                close_reason = "趋势反转做多（连续确认）"
+                    else:
+                        self.consecutive_reverse_count = 1
+                        self.last_reverse_signal = "long"
+                else:
+                    pass
+            
+            if not should_close and position_pnl_pct < -3:
+                should_close = True
+                close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
+            
+            if not should_close and not should_add and (
+                position_pnl_pct > 1
+                and signal["trend_strength"] > self.threshold
+            ):
+                if (
+                    self.current_position == "LONG"
+                    and signal["trend_direction"] == "LONG"
+                ) or (
+                    self.current_position == "SHORT"
+                    and signal["trend_direction"] == "SHORT"
+                ):
+                    should_add = True
+            
+            if should_close:
+                action = True
+                action_reason = close_reason
+                log_msg(f"[平仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - {close_reason}")
+                trade_info = self._simulate_close_position(current_price, candle_time, close_reason, fee_rate, slippage)
+                if trade_info:
+                    log_msg(f"[平仓完成] 盈亏: {trade_info['pnl']:+.2f} ({trade_info['pnl_pct']:+.2f}%), 手续费: {trade_info['fee']:.2f}")
+            elif should_add:
+                pass
+            
+        else:
+            if self._last_had_position:
+                self._reset_full_state()
+            else:
+                self._reset_position_only()
+            
+            self._last_had_position = False
+            
+            signal_valid = signal.get("signal_valid", True)
+            
+            if not signal_valid:
+                self.consecutive_entry_count = 0
+                self.last_entry_signal = None
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_direction"] not in ["LONG", "SHORT"]:
+                return action, action_reason, trade_info, log_messages
+            
+            if signal["trend_strength"] < self.threshold:
+                return action, action_reason, trade_info, log_messages
+            
+            has_strong_signal = False
+            has_turning_point = signal.get("has_turning_point", False)
+            signal_strength = signal.get("trend_strength", 0)
+            
+            if has_turning_point or signal_strength > self.threshold * 1.5:
+                has_strong_signal = True
+            
+            current_entry_signal = signal["trend_direction"]
+            
+            if current_entry_signal == self.last_entry_signal:
+                self.consecutive_entry_count += 1
+                
+                if self.consecutive_entry_count >= self.entry_confirm_count:
+                    action = True
+                    action_reason = "开仓信号确认"
+                    log_msg(f"[开仓] {candle_time.strftime('%Y-%m-%d %H:%M:%S')} - 方向: {signal['trend_direction']}, 趋势强度: {signal_strength:.4f}")
+                    trade_info = self._simulate_open_position(
+                        signal, current_price, candle_time, fee_rate, slippage
+                    )
+                    if trade_info:
+                        log_msg(f"[开仓完成] 价格: {trade_info['price']:.2f}, 数量: {trade_info['size']:.4f}, 手续费: {trade_info['fee']:.2f}")
+                    self.consecutive_entry_count = 0
+                    self.last_entry_signal = None
+            else:
+                self.consecutive_entry_count = 1
+                self.last_entry_signal = current_entry_signal
+        
+        return action, action_reason, trade_info, log_messages
+
+    def _simulate_open_position(self, signal, price, time, fee_rate, slippage):
+        """模拟开仓"""
+        direction = signal["trend_direction"]
+        
+        slippage_price = price * (1 + slippage) if direction == "LONG" else price * (1 - slippage)
+        
+        position_size = (self.current_balance * 0.1) / slippage_price
+        position_size = max(position_size, 0.001)
+        
+        fee = slippage_price * position_size * fee_rate
+        
+        self.current_position = direction
+        self.position_entry_price = slippage_price
+        self.position_size = position_size
+        self.post_entry_time = time
+        self.post_entry_entry_count = 0
+        
+        # 设置止盈止损价格（优先使用 AI 推荐值）
+        if "ai_stop_loss" in signal and "ai_take_profit_1" in signal:
+            self.stop_loss_price = signal["ai_stop_loss"]
+            self.take_profit_1_price = signal["ai_take_profit_1"]
+            self.take_profit_2_price = signal.get("ai_take_profit_2", None)
+        else:
+            # 备选方案：使用默认值
+            if direction == "LONG":
+                self.stop_loss_price = slippage_price * 0.985  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 1.012  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 1.025  # 止盈2 2.5%
+            else:
+                self.stop_loss_price = slippage_price * 1.015  # 止损1.5%
+                self.take_profit_1_price = slippage_price * 0.988  # 止盈1 1.2%
+                self.take_profit_2_price = slippage_price * 0.975  # 止盈2 2.5%
+        
+        self.tp1_hit = False
+        
+        trade_info = {
+            "type": "OPEN",
+            "direction": direction,
+            "price": slippage_price,
+            "size": position_size,
+            "fee": fee,
+            "time": time,
+            "reason": "开仓"
+        }
+        
+        self.trade_history.append(trade_info)
+        self.current_balance -= fee
+        
+        return trade_info
+
+    def _simulate_close_position(self, price, time, reason, fee_rate, slippage):
+        """模拟平仓"""
+        direction = self.current_position
+        
+        slippage_price = price * (1 - slippage) if direction == "LONG" else price * (1 + slippage)
+        
+        if direction == "LONG":
+            pnl = (slippage_price - self.position_entry_price) * self.position_size
+        else:
+            pnl = (self.position_entry_price - slippage_price) * self.position_size
+        
+        fee = slippage_price * self.position_size * fee_rate
+        
+        self.current_balance += pnl - fee
+        
+        trade_info = {
+            "type": "CLOSE",
+            "direction": direction,
+            "entry_price": self.position_entry_price,
+            "exit_price": slippage_price,
+            "size": self.position_size,
+            "pnl": pnl,
+            "pnl_pct": (pnl / (self.position_entry_price * self.position_size)) * 100 if self.position_entry_price else 0,
+            "fee": fee,
+            "time": time,
+            "reason": reason
+        }
+        
+        self.trade_history.append(trade_info)
+        
+        if self.peak_balance < self.current_balance:
+            self.peak_balance = self.current_balance
+        
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance if self.peak_balance > 0 else 0
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+        
+        self.current_position = None
+        self.position_entry_price = None
+        self.position_size = 0
+        self.post_entry_time = None
+        self.post_entry_entry_count = 0
+        
+        return trade_info
+
+    def _calculate_backtest_metrics(self, trades, equity_curve, initial_capital, total_fees):
+        """计算回测指标"""
+        closed_trades = [t for t in trades if t['type'] == 'CLOSE']
+        
+        total_trades = len(closed_trades)
+        win_trades = len([t for t in closed_trades if t['pnl'] > 0])
+        loss_trades = len([t for t in closed_trades if t['pnl'] <= 0])
+        
+        win_rate = win_trades / total_trades if total_trades > 0 else 0
+        
+        total_pnl = sum(t['pnl'] for t in closed_trades)
+        total_return = total_pnl / initial_capital if initial_capital > 0 else 0
+        
+        avg_win = np.mean([t['pnl'] for t in closed_trades if t['pnl'] > 0]) if win_trades > 0 else 0
+        avg_loss = np.mean([abs(t['pnl']) for t in closed_trades if t['pnl'] <= 0]) if loss_trades > 0 else 0
+        profit_factor = (avg_win * win_trades) / (avg_loss * loss_trades) if (avg_loss > 0 and loss_trades > 0) else float('inf')
+        
+        max_drawdown = self.max_drawdown
+        
+        avg_profit_pct = np.mean([t['pnl_pct'] for t in closed_trades]) if total_trades > 0 else 0
+        
+        return {
+            "trades": trades,
+            "closed_trades": closed_trades,
+            "equity_curve": equity_curve,
+            "initial_capital": initial_capital,
+            "final_capital": self.current_balance,
+            "total_return": total_return,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "total_trades": total_trades,
+            "win_trades": win_trades,
+            "loss_trades": loss_trades,
+            "avg_profit": avg_profit_pct,
+            "total_fees": total_fees
+        }

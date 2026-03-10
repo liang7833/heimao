@@ -658,6 +658,383 @@ class Qwen3Optimizer:
             return self.optimization_cache.get(key)
         return self.optimization_cache
     
+    def optimize_coordinator_parameters(self, 
+                                       risk_profile: str = "balanced",
+                                       strategy_type: str = "trend_following",
+                                       market_conditions: Dict = None) -> Dict:
+        """
+        优化策略协调器参数
+        
+        Args:
+            risk_profile: 风险偏好 (conservative/balanced/aggressive)
+            strategy_type: 策略类型
+            market_conditions: 市场条件
+            
+        Returns:
+            协调器优化参数
+        """
+        if not self.is_loaded:
+            return {"error": "Qwen3模型未加载"}
+        
+        # 构建提示
+        prompt = self._build_coordinator_optimization_prompt(
+            risk_profile=risk_profile,
+            strategy_type=strategy_type,
+            market_conditions=market_conditions
+        )
+        
+        try:
+            # 生成优化建议
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=self.max_length)
+            
+            if self.device == "cuda":
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=768,
+                temperature=0.6,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # 提取协调器参数
+            coordinator_params = self._extract_coordinator_parameters(response)
+            
+            result = {
+                "success": True,
+                "risk_profile": risk_profile,
+                "strategy_type": strategy_type,
+                "coordinator_parameters": coordinator_params,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # 缓存结果
+            cache_key = f"coordinator_{risk_profile}_{strategy_type}"
+            self.optimization_cache[cache_key] = result
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _build_coordinator_optimization_prompt(self,
+                                               risk_profile: str,
+                                               strategy_type: str,
+                                               market_conditions: Dict = None) -> str:
+        """构建协调器参数优化提示"""
+        
+        market_info = market_conditions or {
+            "trend": "sideways",
+            "volatility": "medium",
+            "liquidity": "high"
+        }
+        
+        prompt = f"""你是一个专业的量化交易系统优化专家。请根据以下条件优化策略协调器的参数。
+
+策略协调器可配置参数:
+- min_signal_strength: 最小信号强度 (0.0-1.0, 默认0.15)
+- max_position_size: 最大仓位比例 (0.0-1.0, 默认0.1)
+- sentiment_weight: 舆情信号权重 (0.0-1.0, 默认0.3)
+- technical_weight: 技术信号权重 (0.0-1.0, 默认0.7)
+- black_swan_threshold: 黑天鹅风险阈值 (LOW/MEDIUM/HIGH, 默认HIGH)
+- enable_adaptive_filtering: 是否启用自适应过滤 (True/False, 默认True)
+
+输入条件:
+- 风险偏好: {risk_profile} (conservative=保守, balanced=平衡, aggressive=激进)
+- 策略类型: {strategy_type}
+- 市场趋势: {market_info.get('trend', 'sideways')}
+- 市场波动率: {market_info.get('volatility', 'medium')}
+- 市场流动性: {market_info.get('liquidity', 'high')}
+
+请根据以上条件，推荐协调器的最优参数配置。
+
+请以JSON格式返回:
+{{
+    "reasoning": "参数优化理由",
+    "coordinator_parameters": {{
+        "min_signal_strength": 0.15,
+        "max_position_size": 0.1,
+        "sentiment_weight": 0.3,
+        "technical_weight": 0.7,
+        "black_swan_threshold": "HIGH",
+        "enable_adaptive_filtering": true
+    }}
+}}"""
+
+        return prompt
+    
+    def _extract_coordinator_parameters(self, response: str) -> Dict:
+        """提取协调器参数"""
+        try:
+            start = response.find('{')
+            end = response.rfind('}') + 1
+            if start != -1 and end > start:
+                json_str = response[start:end]
+                data = json.loads(json_str)
+                return data.get('coordinator_parameters', {})
+        except:
+            pass
+        
+        return {}
+    
+    def analyze_and_optimize_all_parameters(self,
+                                            market_conditions: Dict = None,
+                                            performance_data: Dict = None,
+                                            risk_profile: str = "balanced",
+                                            optimization_reason: str = "regular",
+                                            optimization_details: dict = None) -> Dict:
+        """
+        全面分析市场并优化所有交易参数
+        
+        Args:
+            market_conditions: 市场条件数据
+            performance_data: 历史性能数据
+            risk_profile: 风险偏好
+            optimization_reason: 优化原因
+                - "regular": 定期优化
+                - "loss_trigger": 亏损触发
+                - "performance": 表现不佳
+                - "market_change": 市场环境变化
+            optimization_details: 优化详细信息
+            
+        Returns:
+            完整的优化参数集
+        """
+        if not self.is_loaded:
+            return {"error": "Qwen3模型未加载"}
+        
+        # 构建提示
+        prompt = self._build_full_optimization_prompt(
+            market_conditions=market_conditions,
+            performance_data=performance_data,
+            risk_profile=risk_profile,
+            optimization_reason=optimization_reason,
+            optimization_details=optimization_details
+        )
+        
+        try:
+            # 生成优化建议
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=self.max_length)
+            
+            if self.device == "cuda":
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=1536,
+                temperature=0.6,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # 提取完整参数
+            full_params = self._extract_full_parameters(response)
+            
+            result = {
+                "success": True,
+                "risk_profile": risk_profile,
+                "full_parameters": full_params,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # 缓存结果
+            cache_key = f"full_optimization_{risk_profile}_{datetime.now().strftime('%Y%m%d_%H')}"
+            self.optimization_cache[cache_key] = result
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _build_full_optimization_prompt(self,
+                                        market_conditions: Dict = None,
+                                        performance_data: Dict = None,
+                                        risk_profile: str = "balanced",
+                                        optimization_reason: str = "regular",
+                                        optimization_details: dict = None) -> str:
+        """构建完整优化提示"""
+        
+        market_info = market_conditions or {
+            "trend": "sideways",
+            "volatility": "medium",
+            "liquidity": "high",
+            "current_price": 50000,
+            "price_change_24h": 0.0
+        }
+        
+        perf_info = performance_data or {
+            "win_rate": 0.55,
+            "profit_factor": 1.3,
+            "sharpe_ratio": 1.2,
+            "max_drawdown": 0.15,
+            "total_trades": 100
+        }
+        
+        # 优化原因说明
+        reason_descriptions = {
+            "regular": "定期优化 - 保持策略持续适应市场变化",
+            "loss_trigger": "亏损触发 - 因账户亏损达到阈值需要优化风险控制",
+            "no_trade": "无交易触发 - 因12小时无交易需要优化信号灵敏度和入场条件",
+            "performance": "表现不佳 - 策略表现持续低迷需要调整",
+            "market_change": "市场环境变化 - 市场状态发生重大变化"
+        }
+
+        reason_text = reason_descriptions.get(optimization_reason, "定期优化")
+        
+        prompt = f"""你是一个专业的量化交易策略优化专家。请全面分析市场条件并优化所有交易参数。
+
+【重要】本次优化原因:
+{reason_text}
+{'详细信息: ' + str(optimization_details) if optimization_details else ''}
+
+【优化建议】:
+- 如果是亏损触发，请重点优化止损参数、仓位大小和风险阈值
+- 如果是无交易触发，请重点优化信号灵敏度、入场条件和确认次数，降低入场门槛
+- 如果是定期优化，请微调参数，保持当前策略风格
+- 如果是表现不佳，请全面评估并重新平衡所有参数
+- 如果是市场环境变化，请重点调整趋势判断和波动率参数
+
+输入信息:
+市场条件:
+- 趋势方向: {market_info.get('trend', 'sideways')}
+- 波动率: {market_info.get('volatility', 'medium')}
+- 流动性: {market_info.get('liquidity', 'high')}
+- 当前价格: ${market_info.get('current_price', 50000):.2f}
+- 24h涨跌幅: {market_info.get('price_change_24h', 0):.2%}
+
+历史性能:
+- 胜率: {perf_info.get('win_rate', 0.55):.1%}
+- 盈亏比: {perf_info.get('profit_factor', 1.3):.2f}
+- 夏普比率: {perf_info.get('sharpe_ratio', 1.2):.2f}
+- 最大回撤: {perf_info.get('max_drawdown', 0.15):.1%}
+- 总交易次数: {perf_info.get('total_trades', 100)}
+
+风险偏好: {risk_profile} (conservative=保守, balanced=平衡, aggressive=激进)
+
+请优化以下所有交易参数:
+
+1. 协调器参数 (coordinator_parameters):
+   - min_signal_strength: 最小信号强度 (0.0-1.0)
+   - max_position_size: 最大仓位比例 (0.0-1.0)
+   - sentiment_weight: 舆情权重 (0.0-1.0)
+   - technical_weight: 技术权重 (0.0-1.0)
+   - black_swan_threshold: 黑天鹅阈值 (LOW/MEDIUM/HIGH)
+   - enable_adaptive_filtering: 自适应过滤 (True/False)
+
+2. 基础参数 (basic_parameters):
+   - LEVERAGE: 杠杆倍数 (1-125)
+   - TREND_STRENGTH_THRESHOLD: 趋势强度阈值 (0.001-0.05)
+   - LOOKBACK_PERIOD: 回看周期 (64-1024)
+   - PREDICTION_LENGTH: 预测长度 (12-120)
+   - CHECK_INTERVAL: 检查间隔秒数 (60-1800)
+
+3. 入场过滤参数 (entry_filter):
+   - max_kline_change: 最大K线变化 (0.001-0.05)
+   - max_funding_rate_long: 多头最大资金费率 (-0.1-0.1)
+   - min_funding_rate_short: 空头最小资金费率 (-0.1-0.1)
+   - support_buffer: 支撑位缓冲 (1.001-1.01)
+   - resistance_buffer: 阻力位缓冲 (0.99-0.999)
+
+4. 止损参数 (stop_loss):
+   - long_buffer: 多头止损缓冲 (0.98-0.999)
+   - short_buffer: 空头止损缓冲 (1.001-1.02)
+
+5. 止盈参数 (take_profit):
+   - tp1_multiplier_long: 多头止盈1倍数 (1.005-1.05)
+   - tp2_multiplier_long: 多头止盈2倍数 (1.01-1.1)
+   - tp1_multiplier_short: 空头止盈1倍数 (0.95-0.995)
+   - tp2_multiplier_short: 空头止盈2倍数 (0.9-0.99)
+   - tp1_position_ratio: 止盈1仓位比例 (0.3-0.7)
+
+6. 风险管理参数 (risk_management):
+   - single_trade_risk: 单笔交易风险 (0.005-0.05)
+   - daily_loss_limit: 日亏损限制 (0.01-0.1)
+   - max_consecutive_losses: 最大连续亏损 (2-10)
+   - pause_after_losses_minutes: 亏损后暂停分钟 (10-60)
+   - max_single_position: 最大单笔仓位 (0.1-0.5)
+   - max_daily_position: 最大日仓位 (0.2-0.8)
+   - extreme_move_threshold: 极端波动阈值 (0.01-0.05)
+
+7. 交易频率参数 (trade_frequency):
+   - max_daily_trades: 最大日交易次数 (5-50)
+   - min_trade_interval_minutes: 最小交易间隔分钟 (5-60)
+   - active_hours_start: 活跃开始时间 (0-23)
+   - active_hours_end: 活跃结束时间 (0-23)
+
+8. 仓位管理参数 (position_management):
+   - initial_entry_ratio: 初始入场比例 (0.3-0.8)
+   - confirm_interval_kline: 确认K线数 (1-10)
+
+9. 三套策略参数 (strategy_parameters):
+   - TREND_BURST.min_trend_strength: 趋势爆发策略最小趋势强度 (0.005-0.02)
+   - RANGE_ARBITRAGE.max_trend_strength: 震荡套利策略最大趋势强度 (0.003-0.01)
+   - NEWS_BREAKOUT.min_trend_strength: 消息突破策略最小趋势强度 (0.008-0.025)
+
+10. 确认次数参数 (confirmation_parameters):
+    - ENTRY_CONFIRM_COUNT: 开仓确认次数 (1-5)
+    - REVERSE_CONFIRM_COUNT: 趋势反转确认次数 (2-5)
+    - STRONG_REVERSE_CONFIRM_COUNT: 强趋势反转确认次数 (2-4)
+
+请以JSON格式返回:
+{{
+    "market_analysis": "市场分析总结",
+    "optimization_reasoning": "优化理由说明",
+    "coordinator_parameters": {{...}},
+    "basic_parameters": {{
+        "LEVERAGE": 5,
+        "TREND_STRENGTH_THRESHOLD": 0.008,
+        "ENTRY_CONFIRM_COUNT": 2,
+        "REVERSE_CONFIRM_COUNT": 3,
+        "STRONG_REVERSE_CONFIRM_COUNT": 2
+    }},
+    "entry_filter": {{...}},
+    "stop_loss": {{...}},
+    "take_profit": {{...}},
+    "risk_management": {{...}},
+    "trade_frequency": {{...}},
+    "position_management": {{...}},
+    "strategy_parameters": {{
+        "TREND_BURST": {{
+            "min_trend_strength": 0.010
+        }},
+        "RANGE_ARBITRAGE": {{
+            "max_trend_strength": 0.008
+        }},
+        "NEWS_BREAKOUT": {{
+            "min_trend_strength": 0.015
+        }}
+    }}
+}}"""
+
+        return prompt
+    
+    def _extract_full_parameters(self, response: str) -> Dict:
+        """提取完整参数"""
+        try:
+            start = response.find('{')
+            end = response.rfind('}') + 1
+            if start != -1 and end > start:
+                json_str = response[start:end]
+                data = json.loads(json_str)
+                return data
+        except:
+            pass
+        
+        return {}
+    
     def clear_cache(self):
         """清空缓存"""
         self.optimization_cache = {}

@@ -84,21 +84,38 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
     print("警告: transformers库未安装，部分功能受限")
 
+try:
+    from qwen_news_processor import QwenNewsProcessor, get_qwen_news_processor
+    QWEN_PROCESSOR_AVAILABLE = True
+except ImportError as e:
+    QWEN_PROCESSOR_AVAILABLE = False
+    print(f"警告: Qwen新闻处理器不可用: {e}")
+
+try:
+    from social_sentiment_crawler import SocialSentimentCrawler, get_social_sentiment_crawler
+    SOCIAL_SENTIMENT_AVAILABLE = True
+except ImportError as e:
+    SOCIAL_SENTIMENT_AVAILABLE = False
+    print(f"警告: 社交媒体情绪爬虫不可用: {e}")
+
 class FinGPTSentimentAnalyzer:
     """FinGPT舆情分析器 - 加密货币新闻和社交媒体情绪分析"""
     
     def __init__(self, 
                  use_local_model: bool = True,
-                 model_name: str = "FinGPT/fingpt-forecaster"):
+                 model_name: str = "FinGPT/fingpt-forecaster",
+                 use_qwen_preprocessing: bool = True):
         """
         初始化FinGPT分析器
         
         Args:
             use_local_model: 是否使用本地模型
             model_name: 本地模型名称
+            use_qwen_preprocessing: 是否使用Qwen新闻预处理
         """
         self.use_local_model = use_local_model
         self.model_name = model_name
+        self.use_qwen_preprocessing = use_qwen_preprocessing
         
         # 兼容 PyInstaller 打包环境
         if getattr(sys, 'frozen', False):
@@ -115,13 +132,50 @@ class FinGPTSentimentAnalyzer:
         self.tokenizer = None
         self.sentiment_pipeline = None
         
-        # 事件检测关键词
+        # Qwen新闻处理器
+        self.qwen_processor = None
+        if use_qwen_preprocessing and QWEN_PROCESSOR_AVAILABLE:
+            try:
+                print("正在初始化Qwen新闻处理器...")
+                self.qwen_processor = get_qwen_news_processor()
+                print("  ✓ Qwen新闻处理器初始化完成")
+            except Exception as e:
+                print(f"  ⚠️ Qwen新闻处理器初始化失败: {e}")
+                self.qwen_processor = None
+        
+        # 社交媒体情绪爬虫
+        self.social_sentiment_crawler = None
+        if SOCIAL_SENTIMENT_AVAILABLE:
+            try:
+                print("正在初始化社交媒体情绪爬虫...")
+                self.social_sentiment_crawler = get_social_sentiment_crawler()
+                print("  ✓ 社交媒体情绪爬虫初始化完成")
+            except Exception as e:
+                print(f"  ⚠️ 社交媒体情绪爬虫初始化失败: {e}")
+                self.social_sentiment_crawler = None
+        
+        # 事件检测关键词（按严重程度分级）- 大幅简化，减少误判
         self.black_swan_keywords = {
-            "regulatory": ["regulation", "ban", "restrict", "crackdown", "lawsuit", "sec", "cfdc"],
-            "security": ["hack", "exploit", "breach", "attack", "vulnerability", "rug pull"],
-            "economic": ["inflation", "recession", "crisis", "default", "bankrupt", "bailout"],
-            "technical": ["bug", "glitch", "downtime", "maintenance", "hard fork", "consensus"],
-            "market": ["crash", "flash crash", "manipulation", "wash trading", "insider"]
+            "critical": {
+                "regulatory": ["ban", "crackdown", "lawsuit"],
+                "security": ["hack", "exploit", "breach", "rug pull"],
+                "economic": ["crisis", "default", "bankrupt"],
+                "market": ["flash crash"]
+            },
+            "warning": {
+                "regulatory": ["restrict", "cfdc"],
+                "security": ["attack", "vulnerability"],
+                "economic": ["inflation", "recession", "bailout"],
+                "technical": ["bug", "glitch", "downtime", "hard fork"],
+                "market": ["manipulation", "wash trading", "insider"]
+            }
+        }
+        
+        # 需要特别小心的关键词，需要额外上下文验证
+        self.sensitive_keywords = {
+            "crash": ["market crash", "price crash", "stock crash", "crypto crash", "bitcoin crash", "btc crash", "ethereum crash", "eth crash"],
+            "regulation": ["new regulation", "strict regulation", "harsh regulation", "government regulation", "regulatory crackdown"],
+            "sec": ["sec lawsuit", "sec investigation", "sec enforcement", "sec ban", "sec crackdown"]
         }
         
         # 初始化模型
@@ -131,7 +185,7 @@ class FinGPTSentimentAnalyzer:
         self.cache = {}
         self.cache_ttl = 300  # 5分钟缓存
         
-        print(f"FinGPT舆情分析器初始化完成 (本地模型: {use_local_model})")
+        print(f"FinGPT舆情分析器初始化完成 (本地模型: {use_local_model}, Qwen预处理: {use_qwen_preprocessing})")
     
     def _initialize_models(self):
         """初始化情绪分析模型"""
@@ -140,6 +194,12 @@ class FinGPTSentimentAnalyzer:
                 print("正在加载本地FinGPT情绪分析模型...")
                 # 使用较小的模型以节省资源
                 # 使用项目目录下的模型
+                # 重新定义 base_dir
+                if getattr(sys, 'frozen', False):
+                    base_dir = os.path.dirname(sys.executable)
+                else:
+                    base_dir = os.path.dirname(__file__)
+                
                 model_path = os.path.join(base_dir, "models", "fingpt-sentiment")
                 model_name = model_path
                 try:
@@ -203,15 +263,15 @@ class FinGPTSentimentAnalyzer:
             print(f"  ⚠️ 加载情绪分析缓存失败: {e}")
             return {}
     
-    def fetch_crypto_news(self, symbol: str = "BTC", limit: int = 20) -> List[Dict]:
-        """获取加密货币新闻数据（使用新闻爬虫缓存）
+    def fetch_crypto_news(self, symbol="BTC", limit=20):
+        """获取加密货币新闻数据（使用新闻爬虫缓存 + Qwen预处理）
         
         Args:
             symbol: 加密货币符号 (BTC, ETH等)
             limit: 最大新闻数量
             
         Returns:
-            新闻数据列表
+            新闻数据列表（英文，已预处理）
         """
         news_data = []
         
@@ -235,10 +295,19 @@ class FinGPTSentimentAnalyzer:
             ]
             news_data = sample_news
         
+        # 使用Qwen预处理新闻
+        if self.use_qwen_preprocessing and self.qwen_processor:
+            print(f"  [Qwen预处理] 正在处理新闻...")
+            processed_news = self.qwen_processor.process_news_batch(news_data)
+            if processed_news:
+                print(f"  [Qwen预处理] 完成，保留{len(processed_news)}条新闻")
+                return processed_news
+        
+        # 如果Qwen不可用或未启用，返回原始新闻
         return news_data
     
-    def fetch_social_sentiment(self, symbol: str = "BTC") -> Dict:
-        """获取社交媒体情绪数据（简化版）
+    def fetch_social_sentiment(self, symbol="BTC"):
+        """获取社交媒体情绪数据
         
         Args:
             symbol: 加密货币符号
@@ -246,7 +315,41 @@ class FinGPTSentimentAnalyzer:
         Returns:
             社交媒体情绪分析结果
         """
-        # 简化版本，不再调用外部API
+        # 使用社交媒体情绪爬虫获取真实数据
+        if self.social_sentiment_crawler:
+            try:
+                print(f"  [社交媒体] 正在获取真实社交媒体情绪数据...")
+                sentiment_data = self.social_sentiment_crawler.fetch_all_sentiment()
+                
+                # 获取 Fear &amp; Greed 数据
+                fear_greed_data = sentiment_data.get("fear_greed", {})
+                fng_score = fear_greed_data.get("sentiment_score", 0.5)
+                
+                # 社交媒体数据直接使用 Fear &amp; Greed 指数
+                social_data = {
+                    "twitter": {
+                        "sentiment_score": fng_score,
+                        "mention_count": 1000,
+                        "trending_topics": [f"#{symbol}", "#crypto"],
+                        "top_influencers": []
+                    },
+                    "reddit": {
+                        "sentiment_score": fng_score,
+                        "mention_count": 500,
+                        "top_subreddits": ["r/CryptoCurrency", f"r/{symbol}"],
+                        "hot_posts": []
+                    },
+                    "fear_greed": fear_greed_data
+                }
+                
+                print(f"  ✓ 社交媒体情绪获取完成 (Fear &amp; Greed): {fng_score:.3f}")
+                return social_data
+                
+            except Exception as e:
+                print(f"  ⚠️ 获取社交媒体情绪失败: {e}")
+        
+        # 回退到简化版本
+        print(f"  ⚠️ 使用简化版社交媒体情绪")
         social_data = {
             "twitter": {
                 "sentiment_score": 0.5,
@@ -349,7 +452,7 @@ class FinGPTSentimentAnalyzer:
         }
     
     def detect_black_swan_events(self, news_data: List[Dict]) -> Dict:
-        """检测黑天鹅事件
+        """检测黑天鹅事件 - 使用Qwen预处理结果，确保一致性
         
         Args:
             news_data: 新闻数据列表
@@ -358,41 +461,85 @@ class FinGPTSentimentAnalyzer:
             黑天鹅事件检测结果
         """
         events = []
+        critical_events = []
         risk_level = "LOW"
         event_types = set()
         
+        # Qwen严重程度到FinGPT严重程度的映射
+        severity_map = {
+            "SEVERE": "critical",
+            "MODERATE": "warning",
+            "MILD": None,
+            "IRRELEVANT": None
+        }
+        
+        # 关键词到事件类型的映射
+        keyword_to_type = {
+            "ban": "regulatory", "crackdown": "regulatory", "lawsuit": "regulatory",
+            "hack": "security", "exploit": "security", "breach": "security", "rug pull": "security",
+            "crisis": "economic", "default": "economic", "bankrupt": "economic",
+            "flash crash": "market",
+            "restrict": "regulatory", "cfdc": "regulatory",
+            "attack": "security", "vulnerability": "security",
+            "inflation": "economic", "recession": "economic", "bailout": "economic",
+            "bug": "technical", "glitch": "technical", "downtime": "technical", "hard fork": "technical",
+            "manipulation": "market", "wash trading": "market", "insider": "market"
+        }
+        
         for news in news_data:
-            content = f"{news.get('title', '')} {news.get('content', '')}".lower()
+            # 优先使用Qwen预处理的结果
+            qwen_analysis = news.get("qwen_analysis", {})
+            qwen_severity = qwen_analysis.get("severity", "MILD")
+            qwen_keywords = qwen_analysis.get("keywords", [])
+            qwen_has_negation = qwen_analysis.get("has_negation", False)
             
-            # 检查各类关键词
-            for event_type, keywords in self.black_swan_keywords.items():
-                for keyword in keywords:
-                    if keyword in content:
-                        events.append({
-                            "type": event_type,
-                            "keyword": keyword,
-                            "title": news.get("title", ""),
-                            "source": news.get("source", ""),
-                            "time": news.get("published_at", "")
-                        })
-                        event_types.add(event_type)
-                        break  # 每个新闻只检测一种事件类型
+            # 如果有否定词，即使Qwen标记为严重也跳过
+            if qwen_has_negation:
+                continue
+                
+            # 映射到FinGPT的严重程度
+            fin_gpt_severity = severity_map.get(qwen_severity)
+            
+            if fin_gpt_severity and qwen_keywords:
+                # 使用Qwen提供的关键词和严重程度
+                for keyword in qwen_keywords[:1]:  # 每个新闻只取第一个关键词
+                    event_type = keyword_to_type.get(keyword, "market")
+                    event_info = {
+                        "type": event_type,
+                        "keyword": keyword,
+                        "severity": fin_gpt_severity,
+                        "title": news.get("title", ""),
+                        "source": news.get("source", ""),
+                        "time": news.get("published_at", "")
+                    }
+                    events.append(event_info)
+                    
+                    if fin_gpt_severity == "critical":
+                        critical_events.append(event_info)
+                        
+                    event_types.add(event_type)
+                    break
         
-        # 确定风险等级
-        if len(events) >= 5:
+        # 计算关键事件数量
+        critical_count = len(critical_events)
+        total_count = len(events)
+        
+        # 确定风险等级（极高阈值，最大程度减少误判）
+        # 只有非常多的严重事件才会触发高风险
+        if critical_count >= 5:
             risk_level = "HIGH"
-        elif len(events) >= 2:
+        elif critical_count >= 2 or total_count >= 15:
             risk_level = "MEDIUM"
-        
-        # 如果有监管或安全事件，提高风险等级
-        if "regulatory" in event_types or "security" in event_types:
-            risk_level = "HIGH"
+        else:
+            risk_level = "LOW"
         
         return {
             "events_detected": events,
+            "critical_events": critical_events,
             "risk_level": risk_level,
             "event_types": list(event_types),
-            "event_count": len(events),
+            "event_count": total_count,
+            "critical_event_count": critical_count,
             "recommendation": self._get_risk_recommendation(risk_level)
         }
     
@@ -477,6 +624,15 @@ class FinGPTSentimentAnalyzer:
         print(f"  [4/4] 正在检测黑天鹅事件...")
         black_swan_analysis = self.detect_black_swan_events(news_data)
         print(f"      ✓ 风险等级: {black_swan_analysis['risk_level']}")
+        
+        # 显示检测到的黑天鹅事件
+        events = black_swan_analysis.get("events_detected", [])
+        if events:
+            print(f"      检测到 {len(events)} 个潜在风险事件:")
+            for event in events[:3]:  # 只显示前3个
+                print(f"        - [{event['type'].upper()}] '{event['keyword']}' - {event['title'][:50]}...")
+            if len(events) > 3:
+                print(f"        ... 还有 {len(events) - 3} 个事件")
         
         # 确定市场情绪状态
         if overall_sentiment > 0.3:
