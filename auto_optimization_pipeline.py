@@ -93,8 +93,13 @@ class AutoOptimizationPipeline:
                     else:
                         base_dir = os.path.dirname(__file__)
                     
+                    # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+                    model_path = os.path.join(base_dir, "_internal", "models", "Qwen3.5-0.8B-Instruct")
+                    if not os.path.exists(model_path):
+                        model_path = os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
+                    
                     self.qwen_optimizer = Qwen3Optimizer(
-                        model_path=os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct"),
+                        model_path=model_path,
                         device=None,  # 自动选择
                         max_length=2048
                     )

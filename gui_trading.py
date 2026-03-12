@@ -374,7 +374,7 @@ class StrategyConfigDialog:
                 "enable_adaptive_filtering": True
             },
             "basic": {
-                "LEVERAGE": 10,
+                "POSITION_MULTIPLIER": 1,
                 "TREND_STRENGTH_THRESHOLD": 0.0047,
                 "LOOKBACK_PERIOD": 91,
                 "PREDICTION_LENGTH": 90,
@@ -446,7 +446,7 @@ class StrategyConfigDialog:
         preset_combo = ttk.Combobox(
             button_frame, 
             textvariable=self.preset_var,
-            values=["激进超短线", "平衡型", "稳健短线"],
+            values=["激进超短线", "趋势追踪", "平衡型", "震荡套利", "稳健长线", "消息驱动"],
             state="readonly",
             width=15
         )
@@ -689,41 +689,356 @@ class StrategyConfigDialog:
         presets = {
             "激进超短线": {
                 "basic": {
-                    "LOOKBACK_PERIOD": 64,
-                    "PREDICTION_LENGTH": 10
+                    "POSITION_MULTIPLIER": 1.8,
+                    "TREND_STRENGTH_THRESHOLD": 0.003,
+                    "LOOKBACK_PERIOD": 48,
+                    "PREDICTION_LENGTH": 8,
+                    "CHECK_INTERVAL": 60
+                },
+                "entry": {
+                    "max_kline_change": 0.025,
+                    "max_funding_rate_long": 0.05,
+                    "min_funding_rate_short": -0.05,
+                    "support_buffer": 1.0005,
+                    "resistance_buffer": 0.9995
+                },
+                "stop_loss": {
+                    "long_buffer": 0.985,
+                    "short_buffer": 1.015
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.965,
+                    "tp2_multiplier_long": 1.03,
+                    "tp3_multiplier_long": 1.06,
+                    "tp1_multiplier_short": 1.035,
+                    "tp2_multiplier_short": 0.97,
+                    "tp3_multiplier_short": 0.94,
+                    "tp1_position_ratio": 0.5,
+                    "tp2_position_ratio": 0.3,
+                    "tp3_position_ratio": 0.2
+                },
+                "risk": {
+                    "single_trade_risk": 0.05,
+                    "daily_loss_limit": 0.2,
+                    "max_consecutive_losses": 4,
+                    "max_single_position": 0.4,
+                    "max_daily_position": 1.0,
+                    "extreme_move_threshold": 0.015
                 },
                 "frequency": {
-                    "min_trade_interval_minutes": 5,
-                    "max_daily_trades": 30
+                    "max_daily_trades": 50,
+                    "min_trade_interval_minutes": 3,
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
                 },
                 "position": {
-                    "confirm_interval_kline": 1
+                    "initial_entry_ratio": 0.5,
+                    "confirm_interval_kline": 1,
+                    "add_on_profit": True,
+                    "add_ratio": 0.5,
+                    "max_add_times": 2
+                },
+                "strategy": {
+                    "entry_confirm_count": 1,
+                    "reverse_confirm_count": 1,
+                    "require_consecutive_prediction": 1,
+                    "post_entry_hours": 2.0,
+                    "take_profit_min_pct": 0.3
+                }
+            },
+            "趋势追踪": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.5,
+                    "TREND_STRENGTH_THRESHOLD": 0.006,
+                    "LOOKBACK_PERIOD": 128,
+                    "PREDICTION_LENGTH": 36,
+                    "CHECK_INTERVAL": 300
+                },
+                "entry": {
+                    "max_kline_change": 0.01,
+                    "max_funding_rate_long": 0.02,
+                    "min_funding_rate_short": -0.02,
+                    "support_buffer": 1.002,
+                    "resistance_buffer": 0.998
+                },
+                "stop_loss": {
+                    "long_buffer": 0.97,
+                    "short_buffer": 1.03
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.99,
+                    "tp2_multiplier_long": 1.08,
+                    "tp3_multiplier_long": 1.2,
+                    "tp1_multiplier_short": 1.01,
+                    "tp2_multiplier_short": 0.92,
+                    "tp3_multiplier_short": 0.8,
+                    "tp1_position_ratio": 0.25,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.4
+                },
+                "risk": {
+                    "single_trade_risk": 0.035,
+                    "daily_loss_limit": 0.15,
+                    "max_consecutive_losses": 5,
+                    "max_single_position": 0.35,
+                    "max_daily_position": 0.9,
+                    "extreme_move_threshold": 0.025
+                },
+                "frequency": {
+                    "max_daily_trades": 10,
+                    "min_trade_interval_minutes": 30,
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
+                },
+                "position": {
+                    "initial_entry_ratio": 0.3,
+                    "confirm_interval_kline": 4,
+                    "add_on_profit": True,
+                    "add_ratio": 0.35,
+                    "max_add_times": 3
+                },
+                "strategy": {
+                    "entry_confirm_count": 2,
+                    "reverse_confirm_count": 3,
+                    "require_consecutive_prediction": 3,
+                    "post_entry_hours": 12.0,
+                    "take_profit_min_pct": 0.8
                 }
             },
             "平衡型": {
                 "basic": {
+                    "POSITION_MULTIPLIER": 1.3,
+                    "TREND_STRENGTH_THRESHOLD": 0.0047,
                     "LOOKBACK_PERIOD": 96,
-                    "PREDICTION_LENGTH": 24
+                    "PREDICTION_LENGTH": 24,
+                    "CHECK_INTERVAL": 180
+                },
+                "entry": {
+                    "max_kline_change": 0.015,
+                    "max_funding_rate_long": 0.03,
+                    "min_funding_rate_short": -0.03,
+                    "support_buffer": 1.001,
+                    "resistance_buffer": 0.999
+                },
+                "stop_loss": {
+                    "long_buffer": 0.99,
+                    "short_buffer": 1.01
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.975,
+                    "tp2_multiplier_long": 1.05,
+                    "tp3_multiplier_long": 1.14,
+                    "tp1_multiplier_short": 1.025,
+                    "tp2_multiplier_short": 0.95,
+                    "tp3_multiplier_short": 0.86,
+                    "tp1_position_ratio": 0.35,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.3
+                },
+                "risk": {
+                    "single_trade_risk": 0.029,
+                    "daily_loss_limit": 0.12,
+                    "max_consecutive_losses": 6,
+                    "max_single_position": 0.29,
+                    "max_daily_position": 0.85,
+                    "extreme_move_threshold": 0.02
                 },
                 "frequency": {
+                    "max_daily_trades": 20,
                     "min_trade_interval_minutes": 10,
-                    "max_daily_trades": 20
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
                 },
                 "position": {
-                    "confirm_interval_kline": 3
+                    "initial_entry_ratio": 0.35,
+                    "confirm_interval_kline": 3,
+                    "add_on_profit": True,
+                    "add_ratio": 1.0,
+                    "max_add_times": 3
+                },
+                "strategy": {
+                    "entry_confirm_count": 1,
+                    "reverse_confirm_count": 2,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 6.0,
+                    "take_profit_min_pct": 0.5
                 }
             },
-            "稳健短线": {
+            "震荡套利": {
                 "basic": {
-                    "LOOKBACK_PERIOD": 192,
-                    "PREDICTION_LENGTH": 30
+                    "POSITION_MULTIPLIER": 1.1,
+                    "TREND_STRENGTH_THRESHOLD": 0.0025,
+                    "LOOKBACK_PERIOD": 64,
+                    "PREDICTION_LENGTH": 12,
+                    "CHECK_INTERVAL": 120
+                },
+                "entry": {
+                    "max_kline_change": 0.008,
+                    "max_funding_rate_long": 0.015,
+                    "min_funding_rate_short": -0.015,
+                    "support_buffer": 1.0015,
+                    "resistance_buffer": 0.9985
+                },
+                "stop_loss": {
+                    "long_buffer": 0.993,
+                    "short_buffer": 1.007
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.962,
+                    "tp2_multiplier_long": 1.022,
+                    "tp3_multiplier_long": 1.035,
+                    "tp1_multiplier_short": 1.038,
+                    "tp2_multiplier_short": 0.978,
+                    "tp3_multiplier_short": 0.965,
+                    "tp1_position_ratio": 0.4,
+                    "tp2_position_ratio": 0.4,
+                    "tp3_position_ratio": 0.2
+                },
+                "risk": {
+                    "single_trade_risk": 0.015,
+                    "daily_loss_limit": 0.08,
+                    "max_consecutive_losses": 8,
+                    "max_single_position": 0.25,
+                    "max_daily_position": 0.7,
+                    "extreme_move_threshold": 0.01
                 },
                 "frequency": {
-                    "min_trade_interval_minutes": 20,
-                    "max_daily_trades": 10
+                    "max_daily_trades": 35,
+                    "min_trade_interval_minutes": 8,
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
                 },
                 "position": {
-                    "confirm_interval_kline": 5
+                    "initial_entry_ratio": 0.4,
+                    "confirm_interval_kline": 2,
+                    "add_on_profit": False,
+                    "add_ratio": 0.0,
+                    "max_add_times": 0
+                },
+                "strategy": {
+                    "entry_confirm_count": 2,
+                    "reverse_confirm_count": 1,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 4.0,
+                    "take_profit_min_pct": 0.25
+                }
+            },
+            "稳健长线": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.0,
+                    "TREND_STRENGTH_THRESHOLD": 0.008,
+                    "LOOKBACK_PERIOD": 192,
+                    "PREDICTION_LENGTH": 48,
+                    "CHECK_INTERVAL": 600
+                },
+                "entry": {
+                    "max_kline_change": 0.006,
+                    "max_funding_rate_long": 0.01,
+                    "min_funding_rate_short": -0.01,
+                    "support_buffer": 1.003,
+                    "resistance_buffer": 0.997
+                },
+                "stop_loss": {
+                    "long_buffer": 0.95,
+                    "short_buffer": 1.05
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 1.01,
+                    "tp2_multiplier_long": 1.12,
+                    "tp3_multiplier_long": 1.3,
+                    "tp1_multiplier_short": 0.99,
+                    "tp2_multiplier_short": 0.88,
+                    "tp3_multiplier_short": 0.7,
+                    "tp1_position_ratio": 0.2,
+                    "tp2_position_ratio": 0.3,
+                    "tp3_position_ratio": 0.5
+                },
+                "risk": {
+                    "single_trade_risk": 0.015,
+                    "daily_loss_limit": 0.05,
+                    "max_consecutive_losses": 10,
+                    "max_single_position": 0.2,
+                    "max_daily_position": 0.5,
+                    "extreme_move_threshold": 0.03
+                },
+                "frequency": {
+                    "max_daily_trades": 5,
+                    "min_trade_interval_minutes": 60,
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
+                },
+                "position": {
+                    "initial_entry_ratio": 0.25,
+                    "confirm_interval_kline": 6,
+                    "add_on_profit": True,
+                    "add_ratio": 0.25,
+                    "max_add_times": 4
+                },
+                "strategy": {
+                    "entry_confirm_count": 3,
+                    "reverse_confirm_count": 4,
+                    "require_consecutive_prediction": 4,
+                    "post_entry_hours": 24.0,
+                    "take_profit_min_pct": 1.2
+                }
+            },
+            "消息驱动": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.3,
+                    "TREND_STRENGTH_THRESHOLD": 0.005,
+                    "LOOKBACK_PERIOD": 80,
+                    "PREDICTION_LENGTH": 18,
+                    "CHECK_INTERVAL": 90
+                },
+                "entry": {
+                    "max_kline_change": 0.02,
+                    "max_funding_rate_long": 0.04,
+                    "min_funding_rate_short": -0.04,
+                    "support_buffer": 1.0008,
+                    "resistance_buffer": 0.9992
+                },
+                "stop_loss": {
+                    "long_buffer": 0.982,
+                    "short_buffer": 1.018
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.97,
+                    "tp2_multiplier_long": 1.045,
+                    "tp3_multiplier_long": 1.09,
+                    "tp1_multiplier_short": 1.03,
+                    "tp2_multiplier_short": 0.955,
+                    "tp3_multiplier_short": 0.91,
+                    "tp1_position_ratio": 0.4,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.25
+                },
+                "risk": {
+                    "single_trade_risk": 0.035,
+                    "daily_loss_limit": 0.15,
+                    "max_consecutive_losses": 5,
+                    "max_single_position": 0.32,
+                    "max_daily_position": 0.88,
+                    "extreme_move_threshold": 0.018
+                },
+                "frequency": {
+                    "max_daily_trades": 25,
+                    "min_trade_interval_minutes": 5,
+                    "active_hours_start": 0,
+                    "active_hours_end": 0
+                },
+                "position": {
+                    "initial_entry_ratio": 0.4,
+                    "confirm_interval_kline": 2,
+                    "add_on_profit": True,
+                    "add_ratio": 0.4,
+                    "max_add_times": 2
+                },
+                "strategy": {
+                    "entry_confirm_count": 1,
+                    "reverse_confirm_count": 2,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 5.0,
+                    "take_profit_min_pct": 0.4
                 }
             }
         }
@@ -784,7 +1099,7 @@ class KronosTradingGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("黑猫交易系统v2.0")
-        self.root.geometry("1650x1160")
+        self.root.geometry("1650x980")
         self.root.configure(bg="#f0f0f0")
         
         # 窗口居中显示
@@ -886,10 +1201,6 @@ class KronosTradingGUI:
         # 初始化AI策略中心相关变量
         self.fingpt_status_var = tk.StringVar(value="未初始化")
         self.coordinator_status_var = tk.StringVar(value="未初始化")
-        self.qwen_status_var = tk.StringVar(value="未初始化")
-        self.qwen_strategy_type_var = tk.StringVar(value="自动选择")
-        self.qwen_risk_var = tk.StringVar(value="平衡型")
-        self.qwen_trade_frequency_var = tk.StringVar(value="中频")
         
         # 交易统计变量
         self.today_trades_var = tk.StringVar(value="0")
@@ -907,9 +1218,6 @@ class KronosTradingGUI:
         # 开仓后计时参数
         self.post_entry_hours_var = tk.StringVar(value="2")
         self.take_profit_min_pct_var = tk.StringVar(value="0.6")
-        
-        # 初始化Qwen3优化器
-        self.qwen_optimizer = None
         
         # 初始化自动化优化系统变量
         self.performance_monitor = None
@@ -1795,7 +2103,7 @@ class KronosTradingGUI:
         label_font = ("微软雅黑", 10)
         value_font = ("微软雅黑", 11, "bold")
 
-        # 初始资金
+        # 初始资金 (第1行第1列)
         ttk.Label(fund_frame, text="初始资金:", font=label_font).grid(
             row=0, column=0, sticky=tk.W, pady=4, padx=5
         )
@@ -1804,32 +2112,32 @@ class KronosTradingGUI:
         )
         self.initial_balance_label.grid(row=0, column=1, sticky=tk.E, pady=4, padx=5)
 
-        # 当前资金
+        # 当前资金 (第1行第2列)
         ttk.Label(fund_frame, text="当前资金:", font=label_font).grid(
-            row=1, column=0, sticky=tk.W, pady=4, padx=5
+            row=0, column=2, sticky=tk.W, pady=4, padx=5
         )
         self.current_balance_label = ttk.Label(
             fund_frame, text="$0.00", font=value_font, foreground="green"
         )
-        self.current_balance_label.grid(row=1, column=1, sticky=tk.E, pady=4, padx=5)
+        self.current_balance_label.grid(row=0, column=3, sticky=tk.E, pady=4, padx=5)
 
-        # 盈亏
+        # 盈亏金额 (第2行第1列)
         ttk.Label(fund_frame, text="盈亏金额:", font=label_font).grid(
-            row=2, column=0, sticky=tk.W, pady=4, padx=5
+            row=1, column=0, sticky=tk.W, pady=4, padx=5
         )
         self.pnl_label = ttk.Label(
             fund_frame, text="$0.00", font=value_font, foreground="red"
         )
-        self.pnl_label.grid(row=2, column=1, sticky=tk.E, pady=4, padx=5)
+        self.pnl_label.grid(row=1, column=1, sticky=tk.E, pady=4, padx=5)
 
-        # 盈亏比例
+        # 盈亏比例 (第2行第2列)
         ttk.Label(fund_frame, text="盈亏比例:", font=label_font).grid(
-            row=3, column=0, sticky=tk.W, pady=4, padx=5
+            row=1, column=2, sticky=tk.W, pady=4, padx=5
         )
         self.pnl_pct_label = ttk.Label(
             fund_frame, text="0.00%", font=value_font, foreground="red"
         )
-        self.pnl_pct_label.grid(row=3, column=1, sticky=tk.E, pady=4, padx=5)
+        self.pnl_pct_label.grid(row=1, column=3, sticky=tk.E, pady=4, padx=5)
 
         # 初始化资金变量
         self.initial_futures_balance = 0.0
@@ -2156,8 +2464,14 @@ class KronosTradingGUI:
                 else:
                     base_dir = os.path.dirname(os.path.abspath(__file__))
                 
-                tokenizer_path = os.path.join(base_dir, "models", "kronos-tokenizer-base")
-                model_path = os.path.join(base_dir, "models", "kronos-small")
+                # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+                tokenizer_path = os.path.join(base_dir, "_internal", "models", "kronos-tokenizer-base")
+                if not os.path.exists(tokenizer_path):
+                    tokenizer_path = os.path.join(base_dir, "models", "kronos-tokenizer-base")
+                
+                model_path = os.path.join(base_dir, "_internal", "models", "kronos-small")
+                if not os.path.exists(model_path):
+                    model_path = os.path.join(base_dir, "models", "kronos-small")
                 
                 self.log(f"Tokenizer路径: {tokenizer_path}")
                 self.log(f"Model路径: {model_path}")
@@ -2953,7 +3267,7 @@ class KronosTradingGUI:
                 "ai_min_deviation": "0.005",
                 "max_funding": "2.0",
                 "min_funding": "-2.0",
-                "timeframe": "1m",
+                "timeframe": "5m",
                 "interval": "60",
             },
             "breakout": {
@@ -2963,7 +3277,27 @@ class KronosTradingGUI:
                 "ai_min_deviation": "0.015",
                 "max_funding": "3.0",
                 "min_funding": "-3.0",
-                "timeframe": "15m",
+                "timeframe": "5m",
+                "interval": "180",
+            },
+            "auto": {
+                "name": "自动策略",
+                "threshold": "0.0047",
+                "ai_min_trend": "0.0047",
+                "ai_min_deviation": "0.005",
+                "max_funding": "3.0",
+                "min_funding": "-3.0",
+                "timeframe": "5m",
+                "interval": "180",
+            },
+            "time": {
+                "name": "时间策略",
+                "threshold": "0.006",
+                "ai_min_trend": "0.006",
+                "ai_min_deviation": "0.006",
+                "max_funding": "3.5",
+                "min_funding": "-3.5",
+                "timeframe": "5m",
                 "interval": "180",
             },
         }
@@ -3271,6 +3605,14 @@ class KronosTradingGUI:
                 "时间策略": "time",
             }
             strategy_type = strategy_map.get(self.strategy_var.get(), "trend")
+            
+            # 5套交易策略强制使用5m时间周期（因为模型训练数据是5m）
+            is_professional_strategy = self.strategy_var.get() in strategy_map
+            if is_professional_strategy:
+                if timeframe != "5m":
+                    self.log(f"⚠️ 检测到选择了{self.strategy_var.get()}策略，强制使用5m时间周期")
+                    timeframe = "5m"
+                    self.timeframe_var.set("5m")
 
             self.log(f"交易对: {symbol}")
             self.log(f"策略: {self.strategy_var.get()}")
@@ -3285,6 +3627,15 @@ class KronosTradingGUI:
             self.log(f"资金费率: [{min_funding}%, {max_funding}%]")
 
             BinanceAPI()
+
+            # 获取完整的AI策略配置
+            ai_strategy_config = None
+            if hasattr(self, "_get_ai_strategy_config_from_ui"):
+                try:
+                    ai_strategy_config = self._get_ai_strategy_config_from_ui()
+                    self.log(f"✓ 已获取AI策略配置")
+                except Exception as e:
+                    self.log(f"⚠ 获取AI策略配置失败: {e}")
 
             # 定义线程安全的Kronos分析回调函数
             def analysis_callback(history_timestamps=None, history_prices=None, 
@@ -3316,7 +3667,8 @@ class KronosTradingGUI:
                 ai_min_deviation=ai_min_deviation,
                 max_funding=max_funding,
                 min_funding=min_funding,
-                analysis_callback=analysis_callback
+                analysis_callback=analysis_callback,
+                strategy_config=ai_strategy_config
             )
 
             # 设置确认次数和新参数 - 从AI策略配置面板读取
@@ -3560,29 +3912,6 @@ class KronosTradingGUI:
                 if hasattr(self, "performance_monitor") and self.performance_monitor:
                     self.log("使用性能监控器优化参数...")
                     self.performance_monitor.optimize_strategy()
-            
-            # 调用Qwen优化器进行参数优化
-            if hasattr(self, "strategy") and hasattr(self.strategy, "qwen_optimizer") and self.strategy.qwen_optimizer:
-                self.log("使用Qwen优化器优化参数...")
-                # 获取K线数据用于Qwen优化
-                if hasattr(self.strategy, "binance") and hasattr(self.strategy, "symbol") and hasattr(self.strategy, "timeframe"):
-                    from strategy_config import StrategyConfig
-                    df = self.strategy.binance.get_recent_klines(
-                        self.strategy.symbol, 
-                        self.strategy.timeframe, 
-                        lookback=StrategyConfig.LOOKBACK_PERIOD
-                    )
-                    if df is not None and len(df) >= 50:
-                        # 直接调用Qwen优化器，传递优化原因
-                        self.strategy._run_qwen_optimization(
-                            df, 
-                            risk_profile="balanced",
-                            optimization_reason=optimization_reason,
-                            optimization_details=optimization_details
-                        )
-                        self.log("Qwen优化器执行完成")
-                    else:
-                        self.log("K线数据不足，跳过Qwen优化")
             
             # 优化后，更新基准资金为当前资金
             current_balance = self.strategy.get_total_balance()
@@ -5645,7 +5974,7 @@ class KronosTradingGUI:
         preset_combo = ttk.Combobox(
             button_frame, 
             textvariable=self.ai_strategy_preset_var,
-            values=["激进超短线", "平衡型", "稳健短线"],
+            values=["激进超短线", "趋势追踪", "平衡型", "震荡套利", "稳健长线", "消息驱动"],
             state="readonly",
             width=15
         )
@@ -5687,7 +6016,7 @@ class KronosTradingGUI:
                 "enable_adaptive_filtering": True
             },
             "basic": {
-                "LEVERAGE": 10,
+                "POSITION_MULTIPLIER": 1.2,
                 "TREND_STRENGTH_THRESHOLD": 0.0047,
                 "LOOKBACK_PERIOD": 91,
                 "PREDICTION_LENGTH": 90,
@@ -5817,7 +6146,7 @@ class KronosTradingGUI:
         
         ttk.Label(frame, text="【基础参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
         
-        self._create_ai_strategy_param_row(frame, "basic", "LEVERAGE", "杠杆倍数", "int", 1, 125, "交易使用的杠杆大小")
+        self._create_ai_strategy_param_row(frame, "basic", "POSITION_MULTIPLIER", "仓位倍数", "float", 0.1, 10, "交易仓位大小倍数，最小仓位100起")
         self._create_ai_strategy_param_row(frame, "basic", "TREND_STRENGTH_THRESHOLD", "趋势强度阈值", "float", 0.001, 0.05, "判断趋势有效的阈值")
         self._create_ai_strategy_param_row(frame, "basic", "LOOKBACK_PERIOD", "回看K线数量", "int", 64, 2048, "技术分析使用的历史数据长度")
         self._create_ai_strategy_param_row(frame, "basic", "PREDICTION_LENGTH", "预测K线数量", "int", 4, 200, "Kronos预测的未来K线数量")
@@ -5921,7 +6250,7 @@ class KronosTradingGUI:
         try:
             from strategy_config import StrategyConfig
             default_config["basic"] = {
-                "LEVERAGE": StrategyConfig.LEVERAGE,
+                "POSITION_MULTIPLIER": 1,
                 "TREND_STRENGTH_THRESHOLD": StrategyConfig.TREND_STRENGTH_THRESHOLD,
                 "LOOKBACK_PERIOD": StrategyConfig.LOOKBACK_PERIOD,
                 "PREDICTION_LENGTH": StrategyConfig.PREDICTION_LENGTH,
@@ -6020,41 +6349,350 @@ class KronosTradingGUI:
         presets = {
             "激进超短线": {
                 "basic": {
-                    "LOOKBACK_PERIOD": 64,
-                    "PREDICTION_LENGTH": 10
+                    "POSITION_MULTIPLIER": 1.8,
+                    "TREND_STRENGTH_THRESHOLD": 0.003,
+                    "LOOKBACK_PERIOD": 48,
+                    "PREDICTION_LENGTH": 8,
+                    "CHECK_INTERVAL": 60
+                },
+                "entry": {
+                    "max_kline_change": 0.025,
+                    "max_funding_rate_long": 0.05,
+                    "min_funding_rate_short": -0.05,
+                    "support_buffer": 1.0005,
+                    "resistance_buffer": 0.9995
+                },
+                "stop_loss": {
+                    "long_buffer": 0.985,
+                    "short_buffer": 1.015
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.965,
+                    "tp2_multiplier_long": 1.03,
+                    "tp3_multiplier_long": 1.06,
+                    "tp1_multiplier_short": 1.035,
+                    "tp2_multiplier_short": 0.97,
+                    "tp3_multiplier_short": 0.94,
+                    "tp1_position_ratio": 0.5,
+                    "tp2_position_ratio": 0.3,
+                    "tp3_position_ratio": 0.2
+                },
+                "risk": {
+                    "single_trade_risk": 0.05,
+                    "daily_loss_limit": 0.2,
+                    "max_consecutive_losses": 4,
+                    "max_single_position": 0.4,
+                    "max_daily_position": 1.0
                 },
                 "frequency": {
-                    "min_trade_interval_minutes": 5,
-                    "max_daily_trades": 30
+                    "max_daily_trades": 50,
+                    "min_trade_interval_minutes": 3,
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
                 },
                 "position": {
-                    "confirm_interval_kline": 1
+                    "initial_entry_ratio": 0.5,
+                    "confirm_interval_kline": 1,
+                    "add_on_profit": True,
+                    "add_ratio": 0.5,
+                    "max_add_times": 2
+                },
+                "strategy": {
+                    "entry_confirm_count": 1,
+                    "reverse_confirm_count": 1,
+                    "require_consecutive_prediction": 1,
+                    "post_entry_hours": 2.0,
+                    "take_profit_min_pct": 0.3
+                }
+            },
+            "趋势追踪": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.5,
+                    "TREND_STRENGTH_THRESHOLD": 0.006,
+                    "LOOKBACK_PERIOD": 128,
+                    "PREDICTION_LENGTH": 36,
+                    "CHECK_INTERVAL": 300
+                },
+                "entry": {
+                    "max_kline_change": 0.01,
+                    "max_funding_rate_long": 0.02,
+                    "min_funding_rate_short": -0.02,
+                    "support_buffer": 1.002,
+                    "resistance_buffer": 0.998
+                },
+                "stop_loss": {
+                    "long_buffer": 0.97,
+                    "short_buffer": 1.03
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.99,
+                    "tp2_multiplier_long": 1.08,
+                    "tp3_multiplier_long": 1.2,
+                    "tp1_multiplier_short": 1.01,
+                    "tp2_multiplier_short": 0.92,
+                    "tp3_multiplier_short": 0.8,
+                    "tp1_position_ratio": 0.25,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.4
+                },
+                "risk": {
+                    "single_trade_risk": 0.035,
+                    "daily_loss_limit": 0.15,
+                    "max_consecutive_losses": 5,
+                    "max_single_position": 0.35,
+                    "max_daily_position": 0.9
+                },
+                "frequency": {
+                    "max_daily_trades": 10,
+                    "min_trade_interval_minutes": 30,
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
+                },
+                "position": {
+                    "initial_entry_ratio": 0.3,
+                    "confirm_interval_kline": 4,
+                    "add_on_profit": True,
+                    "add_ratio": 0.35,
+                    "max_add_times": 3
+                },
+                "strategy": {
+                    "entry_confirm_count": 2,
+                    "reverse_confirm_count": 3,
+                    "require_consecutive_prediction": 3,
+                    "post_entry_hours": 12.0,
+                    "take_profit_min_pct": 0.8
                 }
             },
             "平衡型": {
                 "basic": {
+                    "POSITION_MULTIPLIER": 1.3,
+                    "TREND_STRENGTH_THRESHOLD": 0.0047,
                     "LOOKBACK_PERIOD": 96,
-                    "PREDICTION_LENGTH": 24
+                    "PREDICTION_LENGTH": 24,
+                    "CHECK_INTERVAL": 180
+                },
+                "entry": {
+                    "max_kline_change": 0.015,
+                    "max_funding_rate_long": 0.03,
+                    "min_funding_rate_short": -0.03,
+                    "support_buffer": 1.001,
+                    "resistance_buffer": 0.999
+                },
+                "stop_loss": {
+                    "long_buffer": 0.99,
+                    "short_buffer": 1.01
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.975,
+                    "tp2_multiplier_long": 1.05,
+                    "tp3_multiplier_long": 1.14,
+                    "tp1_multiplier_short": 1.025,
+                    "tp2_multiplier_short": 0.95,
+                    "tp3_multiplier_short": 0.86,
+                    "tp1_position_ratio": 0.35,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.3
+                },
+                "risk": {
+                    "single_trade_risk": 0.029,
+                    "daily_loss_limit": 0.12,
+                    "max_consecutive_losses": 6,
+                    "max_single_position": 0.29,
+                    "max_daily_position": 0.85
                 },
                 "frequency": {
+                    "max_daily_trades": 20,
                     "min_trade_interval_minutes": 10,
-                    "max_daily_trades": 20
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
                 },
                 "position": {
-                    "confirm_interval_kline": 3
+                    "initial_entry_ratio": 0.35,
+                    "confirm_interval_kline": 3,
+                    "add_on_profit": True,
+                    "add_ratio": 0.25,
+                    "max_add_times": 3
+                },
+                "strategy": {
+                    "entry_confirm_count": 3,
+                    "reverse_confirm_count": 2,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 6.0,
+                    "take_profit_min_pct": 0.5
                 }
             },
-            "稳健短线": {
+            "震荡套利": {
                 "basic": {
-                    "LOOKBACK_PERIOD": 192,
-                    "PREDICTION_LENGTH": 30
+                    "POSITION_MULTIPLIER": 1.1,
+                    "TREND_STRENGTH_THRESHOLD": 0.0025,
+                    "LOOKBACK_PERIOD": 64,
+                    "PREDICTION_LENGTH": 12,
+                    "CHECK_INTERVAL": 120
+                },
+                "entry": {
+                    "max_kline_change": 0.008,
+                    "max_funding_rate_long": 0.015,
+                    "min_funding_rate_short": -0.015,
+                    "support_buffer": 1.0015,
+                    "resistance_buffer": 0.9985
+                },
+                "stop_loss": {
+                    "long_buffer": 0.993,
+                    "short_buffer": 1.007
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.962,
+                    "tp2_multiplier_long": 1.022,
+                    "tp3_multiplier_long": 1.035,
+                    "tp1_multiplier_short": 1.038,
+                    "tp2_multiplier_short": 0.978,
+                    "tp3_multiplier_short": 0.965,
+                    "tp1_position_ratio": 0.4,
+                    "tp2_position_ratio": 0.4,
+                    "tp3_position_ratio": 0.2
+                },
+                "risk": {
+                    "single_trade_risk": 0.015,
+                    "daily_loss_limit": 0.08,
+                    "max_consecutive_losses": 8,
+                    "max_single_position": 0.25,
+                    "max_daily_position": 0.7
                 },
                 "frequency": {
-                    "min_trade_interval_minutes": 20,
-                    "max_daily_trades": 10
+                    "max_daily_trades": 35,
+                    "min_trade_interval_minutes": 8,
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
                 },
                 "position": {
-                    "confirm_interval_kline": 5
+                    "initial_entry_ratio": 0.4,
+                    "confirm_interval_kline": 2,
+                    "add_on_profit": False,
+                    "add_ratio": 0.0,
+                    "max_add_times": 0
+                },
+                "strategy": {
+                    "entry_confirm_count": 2,
+                    "reverse_confirm_count": 1,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 4.0,
+                    "take_profit_min_pct": 0.25
+                }
+            },
+            "稳健长线": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.0,
+                    "TREND_STRENGTH_THRESHOLD": 0.008,
+                    "LOOKBACK_PERIOD": 192,
+                    "PREDICTION_LENGTH": 48,
+                    "CHECK_INTERVAL": 600
+                },
+                "entry": {
+                    "max_kline_change": 0.006,
+                    "max_funding_rate_long": 0.01,
+                    "min_funding_rate_short": -0.01,
+                    "support_buffer": 1.003,
+                    "resistance_buffer": 0.997
+                },
+                "stop_loss": {
+                    "long_buffer": 0.95,
+                    "short_buffer": 1.05
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 1.01,
+                    "tp2_multiplier_long": 1.12,
+                    "tp3_multiplier_long": 1.3,
+                    "tp1_multiplier_short": 0.99,
+                    "tp2_multiplier_short": 0.88,
+                    "tp3_multiplier_short": 0.7,
+                    "tp1_position_ratio": 0.2,
+                    "tp2_position_ratio": 0.3,
+                    "tp3_position_ratio": 0.5
+                },
+                "risk": {
+                    "single_trade_risk": 0.015,
+                    "daily_loss_limit": 0.05,
+                    "max_consecutive_losses": 10,
+                    "max_single_position": 0.2,
+                    "max_daily_position": 0.5
+                },
+                "frequency": {
+                    "max_daily_trades": 5,
+                    "min_trade_interval_minutes": 60,
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
+                },
+                "position": {
+                    "initial_entry_ratio": 0.25,
+                    "confirm_interval_kline": 6,
+                    "add_on_profit": True,
+                    "add_ratio": 0.25,
+                    "max_add_times": 4
+                },
+                "strategy": {
+                    "entry_confirm_count": 3,
+                    "reverse_confirm_count": 4,
+                    "require_consecutive_prediction": 4,
+                    "post_entry_hours": 24.0,
+                    "take_profit_min_pct": 1.2
+                }
+            },
+            "消息驱动": {
+                "basic": {
+                    "POSITION_MULTIPLIER": 1.3,
+                    "TREND_STRENGTH_THRESHOLD": 0.005,
+                    "LOOKBACK_PERIOD": 80,
+                    "PREDICTION_LENGTH": 18,
+                    "CHECK_INTERVAL": 90
+                },
+                "entry": {
+                    "max_kline_change": 0.02,
+                    "max_funding_rate_long": 0.04,
+                    "min_funding_rate_short": -0.04,
+                    "support_buffer": 1.0008,
+                    "resistance_buffer": 0.9992
+                },
+                "stop_loss": {
+                    "long_buffer": 0.982,
+                    "short_buffer": 1.018
+                },
+                "take_profit": {
+                    "tp1_multiplier_long": 0.97,
+                    "tp2_multiplier_long": 1.045,
+                    "tp3_multiplier_long": 1.09,
+                    "tp1_multiplier_short": 1.03,
+                    "tp2_multiplier_short": 0.955,
+                    "tp3_multiplier_short": 0.91,
+                    "tp1_position_ratio": 0.4,
+                    "tp2_position_ratio": 0.35,
+                    "tp3_position_ratio": 0.25
+                },
+                "risk": {
+                    "single_trade_risk": 0.035,
+                    "daily_loss_limit": 0.15,
+                    "max_consecutive_losses": 5,
+                    "max_single_position": 0.32,
+                    "max_daily_position": 0.88
+                },
+                "frequency": {
+                    "max_daily_trades": 25,
+                    "min_trade_interval_minutes": 5,
+                    "active_hours_start": 0,
+                    "active_hours_end": 24
+                },
+                "position": {
+                    "initial_entry_ratio": 0.4,
+                    "confirm_interval_kline": 2,
+                    "add_on_profit": True,
+                    "add_ratio": 0.4,
+                    "max_add_times": 2
+                },
+                "strategy": {
+                    "entry_confirm_count": 1,
+                    "reverse_confirm_count": 2,
+                    "require_consecutive_prediction": 2,
+                    "post_entry_hours": 5.0,
+                    "take_profit_min_pct": 0.4
                 }
             }
         }
@@ -6123,19 +6761,6 @@ class KronosTradingGUI:
             foreground="#27ae60"
         )
         self.coordinator_status_label.pack(side=tk.LEFT)
-        
-        # Qwen3状态
-        qwen_status_frame = ttk.Frame(status_frame)
-        qwen_status_frame.pack(side=tk.LEFT)
-        
-        ttk.Label(qwen_status_frame, text="Qwen:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
-        self.qwen_status_label = ttk.Label(
-            qwen_status_frame,
-            textvariable=self.qwen_status_var,
-            font=("微软雅黑", 10, "bold"),
-            foreground="#27ae60"
-        )
-        self.qwen_status_label.pack(side=tk.LEFT)
 
         # ==================== AI策略中心控制面板 ====================
         scheduler_frame = ttk.LabelFrame(main_frame, text="🤖 AI策略中心 - 自动优化系统", padding="20")
@@ -6233,7 +6858,7 @@ class KronosTradingGUI:
    • enable_adaptive_filtering: 自适应过滤开关
 
 【2. 基础参数】
-   • LEVERAGE: 杠杆倍数 (1-125)
+   • POSITION_MULTIPLIER: 仓位倍数 (0.1-10)
    • TREND_STRENGTH_THRESHOLD: 趋势强度阈值
    • LOOKBACK_PERIOD: 回看K线数量
    • CHECK_INTERVAL: 策略检查间隔(秒)
@@ -6295,9 +6920,6 @@ class KronosTradingGUI:
         history_scrollbar = ttk.Scrollbar(history_frame, orient=tk.VERTICAL, command=self.optimization_history_text.yview)
         history_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.optimization_history_text.configure(yscrollcommand=history_scrollbar.set)
-
-        # 自动初始化Qwen
-        self._auto_init_qwen3()
 
     def _create_live_monitor_tab(self, parent):
         """创建实盘监控标签页（简化版）"""
@@ -7300,442 +7922,6 @@ class KronosTradingGUI:
         except:
             pass
 
-    def _auto_init_qwen3(self):
-        """自动初始化Qwen3优化器"""
-        try:
-            # 检查是否已经有模型文件
-            model_path = os.path.join(os.path.dirname(__file__), "models", "Qwen3.5-0.8B-Instruct")
-            if not os.path.exists(model_path):
-                print("Qwen3模型文件不存在，跳过自动初始化")
-                self.qwen_status_var.set("模型未下载")
-                self.qwen_status_label.config(foreground="#e74c3c")  # 红色
-                return
-                
-            print("正在自动初始化Qwen3优化器...")
-            from qwen3_optimizer import Qwen3Optimizer
-            
-            self.qwen_optimizer = Qwen3Optimizer(
-                model_path=model_path,
-                device=None,
-                max_length=2048
-            )
-            
-            if self.qwen_optimizer.is_loaded:
-                self.qwen_status_var.set("运行中")
-                self.qwen_status_label.config(foreground="#27ae60")  # 绿色
-                print("Qwen3优化器自动初始化成功")
-                
-                # 将 FinGPT 和 Qwen 传递给新闻爬虫
-                if self.news_crawler:
-                    if self.fingpt_analyzer:
-                        self.news_crawler.set_fingpt_analyzer(self.fingpt_analyzer)
-                    self.news_crawler.set_qwen_optimizer(self.qwen_optimizer)
-                    print("  ✓ 新闻爬虫已连接 FinGPT 和 Qwen")
-                
-                # Qwen初始化成功后，自动启动自动化优化
-                self.root.after(1000, self._auto_start_optimization_and_monitoring)
-            else:
-                self.qwen_status_var.set("自动加载失败")
-                self.qwen_status_label.config(foreground="#e74c3c")  # 红色
-                print("Qwen3优化器自动初始化失败")
-                
-        except Exception as e:
-            print(f"Qwen3优化器自动初始化失败: {e}")
-            self.qwen_status_var.set("自动初始化失败")
-            self.qwen_status_label.config(foreground="#e74c3c")  # 红色
-
-    def _init_qwen3(self):
-        """手动初始化Qwen3优化器"""
-        try:
-            self._log_live_message("正在初始化Qwen3优化器...", "INFO")
-            
-            from qwen3_optimizer import Qwen3Optimizer
-            
-            self.qwen_optimizer = Qwen3Optimizer(
-                model_path=os.path.join(os.path.dirname(__file__), "models", "Qwen3.5-0.8B-Instruct"),  # 本地模型路径
-                device=None,  # 自动选择
-                max_length=2048
-            )
-            
-            if self.qwen_optimizer.is_loaded:
-                self.qwen_status_var.set("运行中")
-                self.qwen_status_label.config(foreground="#27ae60")
-                self._log_live_message("Qwen3优化器初始化成功", "SUCCESS")
-                
-                # 将 FinGPT 和 Qwen 传递给新闻爬虫
-                if self.news_crawler:
-                    if self.fingpt_analyzer:
-                        self.news_crawler.set_fingpt_analyzer(self.fingpt_analyzer)
-                    self.news_crawler.set_qwen_optimizer(self.qwen_optimizer)
-                    self._log_live_message("新闻爬虫已连接 FinGPT 和 Qwen", "SUCCESS")
-                
-                # Qwen初始化成功后，自动启动自动化优化
-                self.root.after(1000, self._auto_start_optimization_and_monitoring)
-            else:
-                self.qwen_status_var.set("加载失败")
-                self.qwen_status_label.config(foreground="#e74c3c")
-                self._log_live_message("Qwen3模型加载失败: 模型未在本地缓存，请下载模型", "ERROR")
-                self._log_live_message(f"模型名称: Qwen/Qwen3.5-0.8B-Instruct", "INFO")
-                self._log_live_message(f"下载命令: pip install huggingface-hub && huggingface-cli download Qwen/Qwen3.5-0.8B-Instruct --local-dir models/Qwen3.5-0.8B-Instruct", "INFO")
-                
-        except Exception as e:
-            self.qwen_status_var.set("初始化失败")
-            self.qwen_status_label.config(foreground="#e74c3c")
-            self._log_live_message(f"Qwen3初始化失败: {e}", "ERROR")
-
-    def _get_qwen_strategy_type_mapping(self):
-        """获取策略类型的中英文映射"""
-        return {
-            "自动选择": "auto",
-            "趋势跟踪": "trend_following",
-            "均值回归": "mean_reversion",
-            "突破策略": "breakout",
-            "高频刷单": "scalping"
-        }
-
-    def _get_qwen_risk_profile_mapping(self):
-        """获取风险偏好的中英文映射"""
-        return {
-            "保守型": "conservative",
-            "平衡型": "balanced",
-            "激进型": "aggressive"
-        }
-
-    def _generate_strategy_with_qwen(self):
-        """使用Qwen3生成策略代码"""
-        try:
-            if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                self._log_live_message("Qwen3优化器未初始化，请先初始化", "ERROR")
-                return
-            
-            # 获取中文选项并转换为英文
-            strategy_type_cn = self.qwen_strategy_type_var.get()
-            risk_profile_cn = self.qwen_risk_var.get()
-            
-            strategy_type = self._get_qwen_strategy_type_mapping().get(strategy_type_cn, "trend_following")
-            risk_profile = self._get_qwen_risk_profile_mapping().get(risk_profile_cn, "balanced")
-            
-            self._log_live_message(f"正在生成策略代码: {strategy_type_cn} | 风险偏好: {risk_profile_cn}", "INFO")
-            
-            # 获取当前市场条件
-            market_conditions = {
-                "symbol": self.live_symbol_var.get(),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            result = self.qwen_optimizer.generate_strategy_code(
-                strategy_type=strategy_type,
-                market_conditions=market_conditions,
-                risk_profile=risk_profile
-            )
-            
-            if result.get("success"):
-                self._log_live_message("策略代码生成成功！", "SUCCESS")
-                self._log_live_message(f"策略类型: {result.get('strategy_type')}", "INFO")
-                self._log_live_message(f"风险偏好: {result.get('risk_profile')}", "INFO")
-                
-                # 显示生成的参数
-                params = result.get('parameters', {})
-                if params:
-                    self._log_live_message("建议参数:", "INFO")
-                    for key, value in list(params.items())[:5]:
-                        self._log_live_message(f"  {key}: {value}", "INFO")
-                
-                # 保存生成的代码到文件
-                code = result.get('generated_code', '')
-                if code:
-                    filename = f"generated_strategy_{strategy_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.write(code)
-                    self._log_live_message(f"策略代码已保存到: {filename}", "SUCCESS")
-            else:
-                error = result.get('error', '未知错误')
-                self._log_live_message(f"策略生成失败: {error}", "ERROR")
-                
-        except Exception as e:
-            self._log_live_message(f"生成策略失败: {e}", "ERROR")
-
-    def _optimize_params_with_qwen(self):
-        """使用Qwen3优化策略参数"""
-        try:
-            if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                self._log_live_message("Qwen3优化器未初始化，请先初始化", "ERROR")
-                return
-            
-            self._log_live_message("正在优化策略参数...", "INFO")
-            
-            # 模拟回测结果（实际应该从回测引擎获取）
-            mock_backtest = {
-                "sharpe_ratio": 1.2,
-                "max_drawdown": -0.15,
-                "win_rate": 0.55,
-                "profit_factor": 1.3,
-                "total_trades": 100
-            }
-            
-            # 获取中文选项并转换为英文
-            strategy_type_cn = self.qwen_strategy_type_var.get()
-            strategy_type = self._get_qwen_strategy_type_mapping().get(strategy_type_cn, "trend_following")
-            
-            result = self.qwen_optimizer.optimize_parameters(
-                backtest_results=mock_backtest,
-                strategy_type=strategy_type,
-                target_metric="sharpe_ratio"
-            )
-            
-            if result.get("success"):
-                self._log_live_message("参数优化完成！", "SUCCESS")
-                
-                optimized_params = result.get('optimized_parameters', {})
-                if optimized_params:
-                    self._log_live_message("优化后的参数:", "INFO")
-                    for key, value in list(optimized_params.items())[:5]:
-                        self._log_live_message(f"  {key}: {value}", "INFO")
-                
-                reasoning = result.get('reasoning', [])
-                if reasoning:
-                    self._log_live_message("优化理由:", "INFO")
-                    for reason in reasoning[:3]:
-                        self._log_live_message(f"  • {reason}", "INFO")
-            else:
-                error = result.get('error', '未知错误')
-                self._log_live_message(f"参数优化失败: {error}", "ERROR")
-                
-        except Exception as e:
-            self._log_live_message(f"优化参数失败: {e}", "ERROR")
-
-    def _analyze_backtest_with_qwen(self):
-        """使用Qwen3分析回测结果"""
-        try:
-            if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                self._log_live_message("Qwen3优化器未初始化，请先初始化", "ERROR")
-                return
-            
-            self._log_live_message("正在分析回测结果...", "INFO")
-            
-            # 模拟回测结果
-            mock_backtest = {
-                "sharpe_ratio": 1.2,
-                "max_drawdown": -0.15,
-                "win_rate": 0.55,
-                "profit_factor": 1.3,
-                "total_trades": 100,
-                "avg_trade_return": 0.02,
-                "max_consecutive_losses": 3
-            }
-            
-            result = self.qwen_optimizer.analyze_backtest_results(mock_backtest)
-            
-            if result.get("success"):
-                self._log_live_message("回测分析完成！", "SUCCESS")
-                
-                analysis = result.get('analysis', {})
-                
-                if 'strengths' in analysis:
-                    self._log_live_message("策略优势:", "INFO")
-                    for strength in analysis['strengths'][:3]:
-                        self._log_live_message(f"  ✓ {strength}", "INFO")
-                
-                if 'weaknesses' in analysis:
-                    self._log_live_message("策略劣势:", "WARNING")
-                    for weakness in analysis['weaknesses'][:3]:
-                        self._log_live_message(f"  ✗ {weakness}", "WARNING")
-                
-                if 'suggestions' in analysis:
-                    self._log_live_message("改进建议:", "INFO")
-                    for suggestion in analysis['suggestions'][:3]:
-                        self._log_live_message(f"  → {suggestion}", "INFO")
-            else:
-                error = result.get('error', '未知错误')
-                self._log_live_message(f"回测分析失败: {error}", "ERROR")
-                
-        except Exception as e:
-            self._log_live_message(f"分析回测失败: {e}", "ERROR")
-
-    def _auto_analyze_market_with_qwen(self):
-        """使用Qwen3自动分析市场并推荐策略"""
-        try:
-            if self.qwen_optimizer is None or not self.qwen_optimizer.is_loaded:
-                self._log_live_message("Qwen3优化器未初始化，请先初始化", "ERROR")
-                return
-            
-            self._log_live_message("=" * 60, "INFO")
-            self._log_live_message("🔍 Qwen3正在自动分析市场状态...", "INFO")
-            self._log_live_message("=" * 60, "INFO")
-            
-            # 获取当前市场数据
-            symbol = self.live_symbol_var.get()
-            self._log_live_message(f"分析交易对: {symbol}", "INFO")
-            
-            # 尝试获取市场数据（使用Kronos分析器）
-            try:
-                from enhanced_kronos import EnhancedKronosAnalyzer
-                analyzer = EnhancedKronosAnalyzer(model_name="kronos-small")
-                
-                # 获取K线数据
-                import pandas as pd
-                from binance_api import BinanceAPI
-                binance = BinanceAPI()
-                
-                # 获取最近100根K线
-                klines = binance.client.futures_klines(
-                    symbol=symbol,
-                    interval='5m',
-                    limit=100
-                )
-                
-                if klines:
-                    # 转换为DataFrame
-                    df = pd.DataFrame(klines, columns=[
-                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                        'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                        'taker_buy_quote', 'ignore'
-                    ])
-                    
-                    # 转换数值类型
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    
-                    # 获取Kronos分析信号
-                    signal = analyzer.get_enhanced_signal(df)
-                    
-                    # 提取市场特征
-                    market_features = {
-                        "trend_direction": signal.get('trend_direction', 'NEUTRAL'),
-                        "trend_strength": signal.get('trend_strength', 0),
-                        "market_state": signal.get('market_state', 'unknown'),
-                        "volatility": signal.get('volatility', 0),
-                        "price_change_pct": signal.get('price_change_pct', 0) * 100,
-                        "current_price": float(df['close'].iloc[-1]) if len(df) > 0 else 0,
-                        "support_level": signal.get('pred_support', 0),
-                        "resistance_level": signal.get('pred_resistance', 0)
-                    }
-                    
-                    self._log_live_message("📊 市场特征分析完成:", "INFO")
-                    self._log_live_message(f"  趋势方向: {market_features['trend_direction']}", "INFO")
-                    self._log_live_message(f"  趋势强度: {market_features['trend_strength']:.4f}", "INFO")
-                    self._log_live_message(f"  市场状态: {market_features['market_state']}", "INFO")
-                    self._log_live_message(f"  价格波动: {market_features['price_change_pct']:.2f}%", "INFO")
-                    
-                else:
-                    market_features = {
-                        "trend_direction": "NEUTRAL",
-                        "trend_strength": 0.5,
-                        "market_state": "unknown",
-                        "note": "无法获取实时数据，使用默认分析"
-                    }
-                    self._log_live_message("⚠️ 无法获取实时市场数据，使用默认分析", "WARNING")
-                    
-            except Exception as e:
-                self._log_live_message(f"获取市场数据失败: {e}", "WARNING")
-                market_features = {
-                    "trend_direction": "NEUTRAL",
-                    "trend_strength": 0.5,
-                    "market_state": "unknown",
-                    "note": "数据获取失败"
-                }
-            
-            # 使用Qwen3进行策略推荐
-            self._log_live_message("🤖 Qwen3正在根据市场特征推荐策略...", "INFO")
-            
-            # 构建提示词让Qwen3推荐策略
-            recommendation = self._get_strategy_recommendation_from_qwen(market_features)
-            
-            if recommendation:
-                self._log_live_message("=" * 60, "INFO")
-                self._log_live_message("✅ Qwen3策略推荐完成！", "SUCCESS")
-                self._log_live_message("=" * 60, "INFO")
-                
-                recommended_strategy = recommendation.get('strategy', '趋势跟踪')
-                recommended_risk = recommendation.get('risk_profile', '平衡型')
-                reasoning = recommendation.get('reasoning', [])
-                
-                # 更新界面选择
-                self.qwen_strategy_type_var.set(recommended_strategy)
-                self.qwen_risk_var.set(recommended_risk)
-                
-                self._log_live_message(f"🎯 推荐策略类型: {recommended_strategy}", "SUCCESS")
-                self._log_live_message(f"⚖️ 推荐风险偏好: {recommended_risk}", "SUCCESS")
-                
-                if reasoning:
-                    self._log_live_message("\n📋 推荐理由:", "INFO")
-                    for reason in reasoning[:5]:
-                        self._log_live_message(f"  • {reason}", "INFO")
-                
-                self._log_live_message("\n💡 提示: 策略类型和风险偏好已自动更新", "INFO")
-                self._log_live_message("   点击'✨ 生成策略代码'即可生成推荐策略", "INFO")
-                
-            else:
-                self._log_live_message("❌ 策略推荐失败，请手动选择策略类型", "ERROR")
-                
-        except Exception as e:
-            self._log_live_message(f"自动分析市场失败: {e}", "ERROR")
-
-    def _get_strategy_recommendation_from_qwen(self, market_features):
-        """从Qwen3获取策略推荐"""
-        try:
-            # 构建市场分析提示
-            trend = market_features.get('trend_direction', 'NEUTRAL')
-            strength = market_features.get('trend_strength', 0)
-            state = market_features.get('market_state', 'unknown')
-            volatility = market_features.get('volatility', 0)
-            price_change = market_features.get('price_change_pct', 0)
-            
-            # 根据市场特征进行简单规则匹配（如果Qwen3不可用）
-            # 或者可以调用Qwen3生成更智能的推荐
-            
-            recommendation = {
-                'strategy': '趋势跟踪',
-                'risk_profile': '平衡型',
-                'reasoning': []
-            }
-            
-            # 基于市场状态的策略推荐逻辑
-            if state == 'trending' or (trend in ['LONG', 'SHORT'] and strength > 0.6):
-                recommendation['strategy'] = '趋势跟踪'
-                recommendation['risk_profile'] = '平衡型' if strength > 0.8 else '保守型'
-                recommendation['reasoning'] = [
-                    f"检测到明显趋势（强度: {strength:.2f}）",
-                    "趋势跟踪策略适合当前市场环境",
-                    f"趋势方向: {trend}"
-                ]
-            elif state == 'ranging' or abs(price_change) < 2:
-                recommendation['strategy'] = '均值回归'
-                recommendation['risk_profile'] = '保守型'
-                recommendation['reasoning'] = [
-                    "市场处于震荡区间",
-                    "均值回归策略适合震荡行情",
-                    f"价格波动较小（{price_change:.2f}%）"
-                ]
-            elif volatility > 0.03 or abs(price_change) > 5:
-                recommendation['strategy'] = '突破策略'
-                recommendation['risk_profile'] = '激进型'
-                recommendation['reasoning'] = [
-                    f"检测到高波动性（{volatility:.4f}）",
-                    "突破策略适合高波动市场",
-                    f"价格变动较大（{price_change:.2f}%）"
-                ]
-            elif state == 'volatile':
-                recommendation['strategy'] = '高频刷单'
-                recommendation['risk_profile'] = '激进型'
-                recommendation['reasoning'] = [
-                    "市场波动剧烈",
-                    "高频刷单可捕捉短期机会",
-                    "需要严格止损控制"
-                ]
-            else:
-                recommendation['reasoning'] = [
-                    f"市场状态: {state}",
-                    f"趋势强度: {strength:.2f}",
-                    "使用默认趋势跟踪策略"
-                ]
-            
-            return recommendation
-            
-        except Exception as e:
-            self._log_live_message(f"获取策略推荐失败: {e}", "ERROR")
-            return None
-    
     def _init_ai_scheduler(self):
         """初始化AI策略中心调度器"""
         try:
@@ -7748,7 +7934,6 @@ class KronosTradingGUI:
             
             # 初始化调度器
             self.ai_scheduler = AIStrategyScheduler(
-                qwen_optimizer=self.qwen_optimizer,
                 parameter_integrator=self.parameter_integrator,
                 strategy_coordinator=self.strategy_coordinator,
                 check_interval_minutes=60
@@ -7859,7 +8044,7 @@ class KronosTradingGUI:
             # 从strategy_config.py读取默认配置
             from strategy_config import StrategyConfig
             config["basic"] = {
-                "LEVERAGE": StrategyConfig.LEVERAGE,
+                "POSITION_MULTIPLIER": 1,
                 "TREND_STRENGTH_THRESHOLD": StrategyConfig.TREND_STRENGTH_THRESHOLD,
                 "LOOKBACK_PERIOD": StrategyConfig.LOOKBACK_PERIOD,
                 "PREDICTION_LENGTH": StrategyConfig.PREDICTION_LENGTH,
@@ -8129,8 +8314,7 @@ class StrategyConfig:
                     check_interval_seconds=900,  # 默认15分钟
                     min_trades_for_analysis=5,
                     performance_history_file="performance_history.json",
-                    judgment_mode=judgment_mode,
-                    qwen_optimizer=self.qwen_optimizer
+                    judgment_mode=judgment_mode
                 )
                 
                 # 设置阈值突破回调
@@ -8152,8 +8336,6 @@ class StrategyConfig:
                 self.auto_optimization_pipeline = AutoOptimizationPipeline(
                     symbol="BTCUSDT",
                     config_path="strategy_config.py",
-                    qwen_model_name="Qwen/Qwen3.5-0.8B-Instruct",  # Qwen3.5-0.8B参数，更轻量快速
-                    enable_qwen=True,  # 启用Qwen3.5优化
                     optimization_history_file="auto_optimization_history.json"
                 )
                 
@@ -8184,43 +8366,6 @@ class StrategyConfig:
         except Exception as e:
             self._log_ai_strategy_message(f"❌ 自动化优化系统初始化失败: {e}", "ERROR")
             return False
-
-    def _auto_start_optimization_and_monitoring(self):
-        """Qwen初始化成功后自动启动自动化优化和监控"""
-        try:
-            print("Qwen初始化成功，自动启动自动化优化和监控...")
-            
-            # 1. 启动自动化优化系统（但不立即启动性能监控）
-            if not self.is_auto_optimization_enabled:
-                if self._initialize_auto_optimization_system():
-                    self.is_auto_optimization_enabled = True
-                    self.auto_optimization_status_var.set("运行中")
-                    
-                    # 确保性能监控器有Qwen引用
-                    if self.performance_monitor:
-                        self.performance_monitor.qwen_optimizer = self.qwen_optimizer
-                    
-                    # 只有在策略实例存在时才启动性能监控
-                    if self.performance_monitor and hasattr(self, 'strategy') and self.strategy:
-                        self.performance_monitor.start_monitoring()
-                        print("✅ 自动化优化已启用（性能监控已启动）")
-                    else:
-                        print("✅ 自动化优化已启用（等待策略实例连接）")
-                else:
-                    print("❌ 自动化优化系统初始化失败")
-            else:
-                # 如果自动化优化已经启用，更新性能监控器的Qwen引用
-                if self.performance_monitor:
-                    self.performance_monitor.qwen_optimizer = self.qwen_optimizer
-                    print("✅ 已更新性能监控器的Qwen引用")
-            
-            # 2. 启动实盘监控
-            if not hasattr(self, 'is_live_monitoring') or not self.is_live_monitoring:
-                if hasattr(self, '_start_live_monitoring'):
-                    self._start_live_monitoring()
-                    print("✅ 实盘监控已启动")
-        except Exception as e:
-            print(f"自动启动失败: {e}")
 
     def _toggle_auto_optimization(self):
         """切换自动化优化状态"""
@@ -8272,26 +8417,12 @@ class StrategyConfig:
             }
             judgment_mode = mode_map.get(mode_display, "threshold")
             
-            # 检查AI模式是否需要Qwen
-            if judgment_mode in ["ai", "hybrid"]:
-                if not self.qwen_optimizer or not self.qwen_optimizer.is_loaded:
-                    self._log_ai_strategy_message("⚠️ Qwen模型未加载，无法使用AI判断模式", "WARNING")
-                    self._log_ai_strategy_message("  请先初始化Qwen3模型", "INFO")
-                    return
-            
             # 切换模式
             if self.performance_monitor:
                 self.performance_monitor.set_judgment_mode(
-                    mode=judgment_mode,
-                    qwen_optimizer=self.qwen_optimizer
+                    mode=judgment_mode
                 )
                 self._log_ai_strategy_message(f"✅ 判断模式已切换为: {mode_display}", "SUCCESS")
-                
-                # 如果是AI或混合模式，提示用户
-                if judgment_mode in ["ai", "hybrid"]:
-                    self._log_ai_strategy_message("  💡 AI模式将使用Qwen3分析性能数据", "INFO")
-                    if judgment_mode == "hybrid":
-                        self._log_ai_strategy_message("  💡 混合模式：先检查固定阈值，再由AI确认", "INFO")
             else:
                 self._log_ai_strategy_message("❌ 性能监控器未初始化", "ERROR")
                 
@@ -8992,7 +9123,24 @@ class StrategyConfig:
             }
             strategy_type = strategy_map.get(self.strategy_var.get(), "trend")
             
+            # 5套交易策略强制使用5m时间周期（因为模型训练数据是5m）
+            is_professional_strategy = self.strategy_var.get() in strategy_map
+            if is_professional_strategy:
+                if timeframe != "5m":
+                    self.backtest_log_text.insert(tk.END, f"[策略创建] 检测到选择了{self.strategy_var.get()}策略，强制使用5m时间周期\n")
+                    timeframe = "5m"
+                    self.timeframe_var.set("5m")
+
             BinanceAPI()
+            
+            # 获取完整的AI策略配置
+            ai_strategy_config = None
+            if hasattr(self, "_get_ai_strategy_config_from_ui"):
+                try:
+                    ai_strategy_config = self._get_ai_strategy_config_from_ui()
+                    self.backtest_log_text.insert(tk.END, "[策略创建] 已获取AI策略配置\n")
+                except Exception as e:
+                    self.backtest_log_text.insert(tk.END, f"[策略创建] 获取AI策略配置失败: {e}\n")
             
             def analysis_callback(history_timestamps=None, history_prices=None, 
                                   pred_timestamps=None, pred_prices=None,
@@ -9013,22 +9161,21 @@ class StrategyConfig:
                 ai_min_deviation=ai_min_deviation,
                 max_funding=max_funding,
                 min_funding=min_funding,
-                analysis_callback=analysis_callback
+                analysis_callback=analysis_callback,
+                strategy_config=ai_strategy_config,
+                backtest_mode=True,
+                log_callback=log_callback
             )
             
-            try:
-                config = self._get_ai_strategy_config_from_ui()
-                self._apply_strategy_config(config)
-                
-                self.backtest_log_text.insert(tk.END, f"[策略创建] 参数设置完成\n")
-                if hasattr(self, "backtest_logger"):
-                    self.backtest_logger.info(f"[策略创建] 参数设置完成")
-            except Exception as e:
-                self.backtest_log_text.insert(tk.END, f"[策略创建] 参数设置失败: {e}\n")
-                if hasattr(self, "backtest_logger"):
-                    self.backtest_logger.error(f"[策略创建] 参数设置失败: {e}")
-            
             self.backtest_log_text.insert(tk.END, "[策略创建] 策略创建成功！\n")
+            self.backtest_log_text.insert(tk.END, "[策略配置] 正在加载策略预设配置...\n")
+            
+            # 加载策略预设的完整配置（包括止盈止损参数等）
+            from professional_strategy import StrategyProfiles
+            self.strategy.strategy_profile = StrategyProfiles.get_profile(strategy_type)
+            self.strategy._load_strategy_config()
+            
+            self.backtest_log_text.insert(tk.END, "[策略配置] 策略预设配置加载完成！\n")
             if hasattr(self, "backtest_logger"):
                 self.backtest_logger.info("[策略创建] 策略创建成功！")
         
@@ -9128,7 +9275,7 @@ class StrategyConfig:
         self.backtest_log_text.insert(tk.END, "="*80 + "\n")
         # 只有当滚动条在最底部时才自动跟随
         scroll_position = self.backtest_log_text.yview()
-        if scroll_position[1] >= 0.99:
+        if scroll_position[1] >= 0.9:
             self.backtest_log_text.see(tk.END)
     
     def _update_progress(self, value):

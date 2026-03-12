@@ -58,7 +58,7 @@ class SocialSentimentCrawler:
                     cache_data = json.load(f)
                     last_update = datetime.fromisoformat(cache_data.get('last_update', ''))
                     if (datetime.now() - last_update).total_seconds() < self.cache_ttl:
-                        print("[社交媒体情绪] 使用缓存的情绪数据")
+                        #print("[社交媒体情绪] 使用缓存的情绪数据")
                         return cache_data.get('sentiment_data', {})
             except Exception:
                 pass
@@ -83,7 +83,7 @@ class SocialSentimentCrawler:
             Fear & Greed 指数数据
         """
         try:
-            print("[社交媒体情绪] 正在获取 Fear & Greed 指数...")
+            #print("[社交媒体情绪] 正在获取 Fear & Greed 指数...")
             
             url = "https://api.alternative.me/fng/"
             response = requests.get(url, timeout=10)
@@ -99,7 +99,7 @@ class SocialSentimentCrawler:
                 # 转换为 0-1 的情绪分数
                 sentiment_score = value / 100.0
                 
-                print(f"[社交媒体情绪] Fear & Greed: {value} ({classification})")
+                #print(f"[社交媒体情绪] Fear & Greed: {value} ({classification})")
                 
                 return {
                     "source": "fear_greed",
@@ -121,14 +121,14 @@ class SocialSentimentCrawler:
             CryptoPanic 情绪数据
         """
         try:
-            print("[社交媒体情绪] 正在获取 CryptoPanic 情绪...")
+            #print("[社交媒体情绪] 正在获取 CryptoPanic 情绪...")
             
             # CryptoPanic 需要 API key，这里使用简单的估算
             # 基于最近新闻情绪的简单估算
             
             sentiment_score = 0.5  # 默认中性
             
-            print(f"[社交媒体情绪] CryptoPanic 情绪估算: {sentiment_score:.2f}")
+            #print(f"[社交媒体情绪] CryptoPanic 情绪估算: {sentiment_score:.2f}")
             
             return {
                 "source": "cryptopanic",
@@ -148,12 +148,12 @@ class SocialSentimentCrawler:
             Twitter 情绪数据
         """
         try:
-            print("[社交媒体情绪] 正在估算 Twitter 情绪...")
+            #print("[社交媒体情绪] 正在估算 Twitter 情绪...")
             
             # 简化版本 - 基于 Fear & Greed 指数估算
             sentiment_score = 0.5
             
-            print(f"[社交媒体情绪] Twitter 情绪估算: {sentiment_score:.2f}")
+            #print(f"[社交媒体情绪] Twitter 情绪估算: {sentiment_score:.2f}")
             
             return {
                 "source": "twitter",
@@ -175,12 +175,12 @@ class SocialSentimentCrawler:
             Reddit 情绪数据
         """
         try:
-            print("[社交媒体情绪] 正在估算 Reddit 情绪...")
+            #print("[社交媒体情绪] 正在估算 Reddit 情绪...")
             
             # 简化版本 - 基于 Fear & Greed 指数估算
             sentiment_score = 0.5
             
-            print(f"[社交媒体情绪] Reddit 情绪估算: {sentiment_score:.2f}")
+            #print(f"[社交媒体情绪] Reddit 情绪估算: {sentiment_score:.2f}")
             
             return {
                 "source": "reddit",
@@ -211,7 +211,7 @@ class SocialSentimentCrawler:
             if cached_data:
                 return cached_data
         
-        print("\n[社交媒体情绪] 开始获取社交媒体情绪数据...")
+        #print("\n[社交媒体情绪] 开始获取社交媒体情绪数据...")
         
         sentiment_data = {}
         
@@ -227,7 +227,7 @@ class SocialSentimentCrawler:
         # 保存缓存
         self._save_cache(sentiment_data)
         
-        print("[社交媒体情绪] 数据获取完成")
+        #print("[社交媒体情绪] 数据获取完成")
         
         return sentiment_data
     
@@ -251,7 +251,7 @@ class SocialSentimentCrawler:
             "timestamp": datetime.now().isoformat()
         }
         
-        print(f"[社交媒体情绪] 综合情绪分数: {combined_score:.3f}")
+        #print(f"[社交媒体情绪] 综合情绪分数: {combined_score:.3f}")
         
         return sentiment_data
 

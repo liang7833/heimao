@@ -114,96 +114,33 @@ class SplashScreen:
 
 def launch_main_program(splash):
     """启动主程序（支持打包环境）"""
-    # 信号文件路径
-    signal_file = os.path.join(base_dir, "_splash_close.txt")
-    
-    # 先清理旧的信号文件
-    try:
-        if os.path.exists(signal_file):
-            os.remove(signal_file)
-    except:
-        pass
-    
     try:
         splash.update_loading("正在初始化主程序...")
         
-        # 判断是否是打包后的环境
-        if getattr(sys, 'frozen', False):
-            # 打包后的exe - 直接在同一进程中运行
-            import gui_trading
-            
-            splash.update_loading("正在准备启动...")
-            time.sleep(0.5)
-            
-            # 创建关闭信号文件
-            def close_splash():
-                try:
-                    with open(signal_file, 'w') as f:
-                        f.write('close')
-                except:
-                    pass
-            
-            # 运行主程序
-            splash.update_loading("启动完成！")
-            time.sleep(0.3)
-            splash.destroy()
-            
-            # 直接调用主程序
-            gui_trading.main()
-            
-        else:
-            # 开发环境 - 使用subprocess启动
-            main_script = os.path.join(base_dir, "gui_trading.py")
-            
-            # 使用与当前解释器相同的Python来运行
-            python_exe = sys.executable
-            
-            splash.update_loading("启动中...")
-            
-            # 启动主程序
-            process = subprocess.Popen([python_exe, main_script])
-            
-            splash.update_loading("等待主程序启动...")
-            
-            # 等待信号文件出现（主程序准备好）
-            max_wait = 60  # 最多等待60秒
-            wait_count = 0
-            while wait_count < max_wait:
-                if os.path.exists(signal_file):
-                    break
-                time.sleep(0.5)
-                wait_count += 0.5
-                # 更新加载动画
-                dots = "." * (int(wait_count) % 4)
-                splash.update_loading(f"等待主程序启动{dots}")
-            
-            # 清理信号文件
-            try:
-                if os.path.exists(signal_file):
-                    os.remove(signal_file)
-            except:
-                pass
-            
-            # 关闭启动画面
-            splash.update_loading("启动完成！")
-            time.sleep(0.3)
-            splash.destroy()
-            
-            # 等待主程序结束
-            process.wait()
+        # 导入主程序
+        import gui_trading
+        
+        splash.update_loading("正在准备启动...")
+        time.sleep(0.5)
+        
+        # 运行主程序
+        splash.update_loading("启动完成！")
+        time.sleep(0.3)
+        
+        # 先销毁启动画面
+        splash.destroy()
+        
+        # 直接调用主程序
+        gui_trading.main()
         
     except Exception as e:
         print(f"启动主程序失败: {e}")
         import traceback
         traceback.print_exc()
-        splash.update_loading(f"启动失败: {e}")
-        time.sleep(3)
-        splash.destroy()
-        
-        # 清理信号文件
         try:
-            if os.path.exists(signal_file):
-                os.remove(signal_file)
+            splash.update_loading(f"启动失败: {e}")
+            time.sleep(3)
+            splash.destroy()
         except:
             pass
 
@@ -213,10 +150,11 @@ def main():
     # 创建启动画面
     splash = SplashScreen()
     
-    # 在新线程中启动主程序
-    thread = Thread(target=launch_main_program, args=(splash,))
-    thread.daemon = True
-    thread.start()
+    # 使用after在主线程中启动主程序（避免多线程问题）
+    def start_main():
+        launch_main_program(splash)
+    
+    splash.root.after(100, start_main)
     
     # 运行启动画面的主循环
     splash.root.mainloop()

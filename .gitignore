@@ -59,6 +59,9 @@ models/.lock/
 btc_news_cache.json
 btc_news_cache_summary.json
 news_sentiment_cache.json
+qwen_news_cache.json
+social_sentiment_cache.json
+_splash_close.txt
 
 # Build files
 黑猫交易系统/

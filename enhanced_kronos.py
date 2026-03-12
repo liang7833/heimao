@@ -118,7 +118,16 @@ def load_kronos_models(model_name: str):
         # 官方模型使用默认特征列表
         OFFICIAL_MODEL_FEATURES = ["open", "high", "low", "close", "volume", "amount"]
         
-        models_dir = os.path.join(os.path.dirname(__file__), "models")
+        # 兼容 PyInstaller 打包环境
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(__file__)
+        
+        # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+        models_dir = os.path.join(base_dir, "_internal", "models")
+        if not os.path.exists(models_dir):
+            models_dir = os.path.join(base_dir, "models")
         
         # 支持的官方模型列表
         official_models = {

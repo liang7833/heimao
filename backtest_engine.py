@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""回测引擎 - 集成策略协调器，进行历史数据回测和实盘交易"""
+"""回测引擎 - 与实盘交易流程完全一致的回测引擎"""
 
 import os
 import sys
@@ -13,42 +13,240 @@ warnings.filterwarnings("ignore")
 # 导入现有模块
 try:
     from binance_api import BinanceAPI
-    from strategy_coordinator import StrategyCoordinator
-    from enhanced_kronos import EnhancedKronosAnalyzer
-    from fingpt_analyzer import FinGPTSentimentAnalyzer
+    from professional_strategy import ProfessionalTradingStrategy
+    from strategy_profiles import StrategyProfiles
 except ImportError as e:
     print(f"模块导入失败: {e}")
     print("请确保所有依赖模块已正确安装")
+    sys.exit(1)
+
+
+class MockBinanceAPI:
+    """模拟币安API，用于回测"""
+    
+    def __init__(self, historical_data, initial_capital=10000.0):
+        self.historical_data = historical_data
+        self.current_index = 0
+        self.initial_capital = initial_capital
+        self.available_balance = initial_capital
+        self.position = 0.0  # 正数表示多仓，负数表示空仓
+        self.entry_price = 0.0
+        self.orders = []
+        self.trade_history = []
+        self.equity_curve = []
+        
+    def get_recent_klines(self, symbol, timeframe, lookback=100):
+        """获取历史K线数据"""
+        end_idx = min(self.current_index + 1, len(self.historical_data))
+        start_idx = max(0, end_idx - lookback)
+        return self.historical_data.iloc[start_idx:end_idx].copy()
+    
+    def get_current_price(self, symbol):
+        """获取当前价格"""
+        if self.current_index < len(self.historical_data):
+            return self.historical_data['close'].iloc[self.current_index]
+        return None
+    
+    def get_funding_rate(self, symbol):
+        """获取资金费率（回测中返回0）"""
+        return 0.0
+    
+    def get_current_position_info(self, symbol):
+        """获取当前持仓信息"""
+        if self.position > 0:
+            return "LONG", abs(self.position)
+        elif self.position < 0:
+            return "SHORT", abs(self.position)
+        return None, 0.0
+    
+    def place_market_buy(self, symbol, quantity):
+        """模拟市价买入（平空或开多）"""
+        if self.current_index >= len(self.historical_data):
+            return False
+        
+        current_price = self.historical_data['close'].iloc[self.current_index]
+        
+        # 考虑滑点
+        slippage = 0.0005  # 0.05%滑点
+        execute_price = current_price * (1 + slippage)
+        
+        # 如果有空仓，先平空
+        if self.position < 0:
+            close_size = abs(self.position)
+            close_value = close_size * execute_price
+            
+            # 计算盈亏
+            pnl = (self.entry_price - execute_price) * close_size
+            
+            # 更新资金
+            self.available_balance += close_value + pnl
+            self.position = 0.0
+            
+            # 记录交易
+            self._record_trade("CLOSE_SHORT", execute_price, close_size, pnl)
+        
+        # 开多仓
+        if quantity > 0:
+            position_value = quantity * execute_price
+            
+            # 检查资金是否足够
+            if position_value > self.available_balance:
+                print(f"资金不足: 需要${position_value:.2f}, 可用${self.available_balance:.2f}")
+                return False
+            
+            # 更新状态
+            self.position = quantity
+            self.entry_price = execute_price
+            self.available_balance -= position_value
+            
+            # 记录交易
+            self._record_trade("OPEN_LONG", execute_price, quantity, 0.0)
+        
+        return True
+    
+    def place_market_sell(self, symbol, quantity):
+        """模拟市价卖出（平多或开空）"""
+        if self.current_index >= len(self.historical_data):
+            return False
+        
+        current_price = self.historical_data['close'].iloc[self.current_index]
+        
+        # 考虑滑点
+        slippage = 0.0005  # 0.05%滑点
+        execute_price = current_price * (1 - slippage)
+        
+        # 如果有多仓，先平多
+        if self.position > 0:
+            close_size = min(quantity, self.position)
+            close_value = close_size * execute_price
+            
+            # 计算盈亏
+            pnl = (execute_price - self.entry_price) * close_size
+            
+            # 更新资金
+            self.available_balance += close_value + pnl
+            self.position -= close_size
+            
+            # 如果全部平仓，重置入场价
+            if self.position == 0:
+                self.entry_price = 0.0
+            
+            # 记录交易
+            self._record_trade("CLOSE_LONG", execute_price, close_size, pnl)
+            
+            return True
+        
+        # 开空仓（简化处理，回测中不实际开空）
+        return True
+    
+    def place_stop_loss_order(self, symbol, side, quantity, stop_price):
+        """模拟止损订单（回测中不实际放置）"""
+        self.orders.append({
+            'type': 'STOP_LOSS',
+            'side': side,
+            'quantity': quantity,
+            'stop_price': stop_price
+        })
+        return True
+    
+    def place_take_profit_order(self, symbol, side, quantity, take_profit_price):
+        """模拟止盈订单（回测中不实际放置）"""
+        self.orders.append({
+            'type': 'TAKE_PROFIT',
+            'side': side,
+            'quantity': quantity,
+            'take_profit_price': take_profit_price
+        })
+        return True
+    
+    def cancel_all_orders(self, symbol):
+        """取消所有订单"""
+        self.orders = []
+        return True
+    
+    def cancel_all_algo_orders(self, symbol):
+        """取消所有算法订单"""
+        return True
+    
+    def _record_trade(self, trade_type, price, quantity, pnl):
+        """记录交易"""
+        timestamp = self.historical_data['timestamps'].iloc[self.current_index] if self.current_index < len(self.historical_data) else datetime.now()
+        self.trade_history.append({
+            'timestamp': timestamp,
+            'type': trade_type,
+            'price': price,
+            'quantity': quantity,
+            'pnl': pnl,
+            'available_balance': self.available_balance,
+            'position': self.position
+        })
+    
+    def get_wallet_balance(self):
+        """获取钱包余额（用于策略初始化）"""
+        return self.available_balance
+    
+    def calculate_current_equity(self):
+        """计算当前权益"""
+        if self.current_index >= len(self.historical_data):
+            return self.available_balance
+        
+        current_price = self.historical_data['close'].iloc[self.current_index]
+        position_value = 0.0
+        
+        if self.position > 0:
+            position_value = self.position * current_price
+        elif self.position < 0:
+            position_value = abs(self.position) * (self.entry_price - current_price) + abs(self.position) * self.entry_price
+        
+        return self.available_balance + position_value
+    
+    def advance(self):
+        """前进到下一个时间点"""
+        if self.current_index < len(self.historical_data) - 1:
+            # 记录权益
+            equity = self.calculate_current_equity()
+            timestamp = self.historical_data['timestamps'].iloc[self.current_index]
+            self.equity_curve.append({
+                'timestamp': timestamp,
+                'equity': equity,
+                'price': self.historical_data['close'].iloc[self.current_index],
+                'position': self.position
+            })
+            
+            self.current_index += 1
+            return True
+        return False
+
 
 class BacktestEngine:
-    """回测引擎 - 加密货币交易策略回测"""
+    """回测引擎 - 与实盘交易流程完全一致"""
     
     def __init__(self, 
                  symbol: str = "BTCUSDT",
                  initial_capital: float = 10000.0,
                  timeframe: str = "5m",
-                 use_fingpt: bool = True,
-                 commission_rate: float = 0.001,  # 默认手续费率0.1%
-                 slippage: float = 0.0005,        # 默认滑点0.05%
+                 strategy_profile: str = "trend",
+                 commission_rate: float = 0.001,
+                 slippage: float = 0.0005,
                  start_date: str = None,
                  end_date: str = None):
         """
         初始化回测引擎
         
         Args:
-            symbol: 交易品种 (BTCUSDT, ETHUSDT等)
-            initial_capital: 初始资金 (USDT)
+            symbol: 交易品种
+            initial_capital: 初始资金
             timeframe: K线时间周期
-            use_fingpt: 是否使用FinGPT舆情分析
+            strategy_profile: 策略预设名称
             commission_rate: 交易手续费率
             slippage: 交易滑点
-            start_date: 回测开始日期 (YYYY-MM-DD)
-            end_date: 回测结束日期 (YYYY-MM-DD)
+            start_date: 回测开始日期
+            end_date: 回测结束日期
         """
         self.symbol = symbol
         self.initial_capital = initial_capital
         self.timeframe = timeframe
-        self.use_fingpt = use_fingpt
+        self.strategy_profile = strategy_profile
         self.commission_rate = commission_rate
         self.slippage = slippage
         
@@ -56,70 +254,45 @@ class BacktestEngine:
         if start_date:
             self.start_date = pd.to_datetime(start_date)
         else:
-            self.start_date = pd.to_datetime("2024-01-01")  # 默认开始日期
+            self.start_date = pd.to_datetime("2024-01-01")
             
         if end_date:
             self.end_date = pd.to_datetime(end_date)
         else:
-            self.end_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))  # 默认结束日期
+            self.end_date = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
         
         print(f"初始化回测引擎: {symbol}")
+        print(f"策略预设: {strategy_profile}")
         print(f"回测周期: {self.start_date.date()} 到 {self.end_date.date()}")
         print(f"初始资金: ${initial_capital:.2f}")
         print(f"时间周期: {timeframe}")
         print(f"手续费率: {commission_rate*100:.2f}%, 滑点: {slippage*100:.2f}%")
         
-        # 初始化策略协调器
-        self.strategy_coordinator = None
-        self.binance_api = None
-        self.historical_data = None
-        
-        # 回测状态变量
-        self.capital = initial_capital
-        self.position = 0.0  # 当前持仓数量
-        self.position_entry_price = 0.0  # 持仓入场价格
-        self.trade_history = []  # 交易历史记录
-        self.equity_curve = []  # 权益曲线
-        self.signals = []  # 信号记录
-        
-        # 性能指标
-        self.performance_metrics = {}
-        
         # 初始化组件
-        self._initialize_components()
+        self.historical_data = None
+        self.mock_binance = None
+        self.strategy = None
+        self.performance_metrics = {}
     
-    def _initialize_components(self):
-        """初始化回测所需组件"""
-        try:
-            print("  初始化策略协调器...")
-            self.strategy_coordinator = StrategyCoordinator(
-                kronos_model_name="kronos-small",
-                use_fingpt=self.use_fingpt,
-                symbol=self.symbol.replace("USDT", "")  # 移除USDT后缀
-            )
-            
-            print("  初始化币安API...")
-            self.binance_api = BinanceAPI()  # 回测使用默认API配置
-            
-            print("  ✓ 回测引擎初始化完成")
-        except Exception as e:
-            print(f"  ✗ 组件初始化失败: {e}")
-            raise
-    
-    def load_historical_data(self, limit: int = 1000) -> pd.DataFrame:
+    def load_historical_data(self, limit: int = 1000, csv_filepath: str = None) -> pd.DataFrame:
         """加载历史K线数据
         
         Args:
-            limit: 加载的K线数量
+            limit: 加载的K线数量（如果从API获取）
+            csv_filepath: CSV文件路径（如果从本地文件加载）
             
         Returns:
             历史K线数据DataFrame
         """
+        if csv_filepath:
+            return self._load_data_from_csv(csv_filepath)
+        
         print(f"正在加载历史数据: {self.symbol} {self.timeframe} {limit}条...")
         
         try:
             # 从币安API获取历史数据
-            df = self.binance_api.get_recent_klines(
+            binance = BinanceAPI()
+            df = binance.get_recent_klines(
                 self.symbol, 
                 self.timeframe, 
                 lookback=limit
@@ -142,8 +315,80 @@ class BacktestEngine:
             self.historical_data = df
             return df
     
+    def _load_data_from_csv(self, csv_filepath: str) -> pd.DataFrame:
+        """从本地CSV文件加载历史数据
+        
+        Args:
+            csv_filepath: CSV文件路径
+            
+        Returns:
+            历史K线数据DataFrame
+        """
+        print(f"正在从CSV文件加载历史数据: {csv_filepath}")
+        
+        try:
+            df = pd.read_csv(csv_filepath)
+            print(f"  ✓ CSV文件读取成功: {len(df)}条记录")
+            print(f"    原始列: {list(df.columns)}")
+            
+            # 确保有必要的列
+            required_columns = ['open', 'high', 'low', 'close', 'volume', 'amount']
+            
+            # 处理时间列
+            if 'timestamps' in df.columns:
+                df['timestamps'] = pd.to_datetime(df['timestamps'])
+            elif 'datetime' in df.columns:
+                df['timestamps'] = pd.to_datetime(df['datetime'])
+                df = df.rename(columns={'datetime': 'timestamps'})
+            else:
+                print("  警告: 未找到时间列，将使用索引生成时间戳")
+                # 使用索引生成时间戳
+                end_time = pd.to_datetime("now")
+                freq_map = {"5m": "5T", "15m": "15T", "1h": "1H", "4h": "4H", "1d": "1D"}
+                freq = freq_map.get(self.timeframe, "5T")
+                df['timestamps'] = pd.date_range(end=end_time, periods=len(df), freq=freq)[::-1]
+            
+            # 确保有volume和amount列
+            if 'volume' not in df.columns and 'vol' in df.columns:
+                df['volume'] = df['vol']
+            if 'amount' not in df.columns and 'amt' in df.columns:
+                df['amount'] = df['amt']
+            
+            # 检查必要列是否都存在
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                print(f"  警告: 缺失必要列: {missing_columns}")
+                print(f"  生成模拟数据进行回测...")
+                return self._generate_mock_data(1000)
+            
+            # 只保留必要的列（去除技术指标列，回测不需要）
+            keep_columns = ['timestamps', 'open', 'high', 'low', 'close', 'volume', 'amount']
+            df = df[keep_columns].copy()
+            
+            # 确保数据按时间升序排列
+            df = df.sort_values('timestamps').reset_index(drop=True)
+            
+            # 去除NaN值
+            df = df.dropna()
+            
+            print(f"  ✓ 数据处理完成: {len(df)}条有效记录")
+            print(f"    时间范围: {df['timestamps'].iloc[0]} 到 {df['timestamps'].iloc[-1]}")
+            print(f"    最终列: {list(df.columns)}")
+            
+            self.historical_data = df
+            return df
+            
+        except Exception as e:
+            print(f"  从CSV加载数据失败: {e}")
+            import traceback
+            traceback.print_exc()
+            print("  生成模拟数据进行回测...")
+            df = self._generate_mock_data(1000)
+            self.historical_data = df
+            return df
+    
     def _generate_mock_data(self, n_candles: int = 1000) -> pd.DataFrame:
-        """生成模拟K线数据（当无法获取真实数据时使用）
+        """生成模拟K线数据
         
         Args:
             n_candles: K线数量
@@ -154,35 +399,29 @@ class BacktestEngine:
         print(f"  生成模拟数据: {n_candles}条{self.timeframe}K线")
         
         # 基础价格参数
-        base_price = 50000.0  # BTC基础价格
-        volatility = 0.02     # 日波动率
+        base_price = 50000.0
+        volatility = 0.02
         
         # 生成时间序列
         end_time = datetime.now()
-        if self.timeframe == "5m":
-            freq = "5T"
-        elif self.timeframe == "15m":
-            freq = "15T"
-        elif self.timeframe == "1h":
-            freq = "1H"
-        elif self.timeframe == "4h":
-            freq = "4H"
-        elif self.timeframe == "1d":
-            freq = "1D"
-        else:
-            freq = "5T"
+        freq_map = {
+            "5m": "5T",
+            "15m": "15T",
+            "1h": "1H",
+            "4h": "4H",
+            "1d": "1D"
+        }
+        freq = freq_map.get(self.timeframe, "5T")
         
         timestamps = pd.date_range(
             end=end_time, 
             periods=n_candles, 
             freq=freq
-        )[::-1]  # 反转使时间递增
+        )[::-1]
         
         # 生成随机价格序列
-        np.random.seed(42)  # 固定随机种子以便复现
+        np.random.seed(42)
         returns = np.random.normal(0, volatility/np.sqrt(365), n_candles)
-        
-        # 累积收益率
         cum_returns = np.exp(np.cumsum(returns))
         prices = base_price * cum_returns
         
@@ -195,7 +434,7 @@ class BacktestEngine:
         # 生成成交量
         avg_volume = 1000
         volumes = avg_volume * (1 + np.random.normal(0, 0.5, n_candles))
-        volumes = np.maximum(volumes, 10)  # 确保最小成交量
+        volumes = np.maximum(volumes, 10)
         
         # 创建DataFrame
         df = pd.DataFrame({
@@ -204,25 +443,20 @@ class BacktestEngine:
             "high": highs,
             "low": lows,
             "close": closes,
-            "amount": volumes
+            "amount": volumes,
+            "volume": volumes
         })
-        
-        # 添加技术指标（简单版本）
-        df["volume"] = df["amount"]
         
         print(f"  ✓ 模拟数据生成完成: {len(df)}条记录")
         print(f"    价格范围: ${df['close'].min():.2f} - ${df['close'].max():.2f}")
         
         return df
     
-    def run_backtest(self, 
-                     data: pd.DataFrame = None,
-                     position_size_pct: float = 0.1) -> dict:
+    def run_backtest(self, data: pd.DataFrame = None) -> dict:
         """运行回测
         
         Args:
             data: 回测数据 (如果为None则使用加载的历史数据)
-            position_size_pct: 每次交易的仓位比例
             
         Returns:
             回测结果字典
@@ -235,62 +469,52 @@ class BacktestEngine:
         
         print(f"\n=== 开始回测 ===")
         print(f"数据量: {len(data)}条K线")
-        print(f"仓位比例: {position_size_pct*100:.1f}%")
         print(f"开始时间: {data['timestamps'].iloc[0]}")
         print(f"结束时间: {data['timestamps'].iloc[-1]}")
         
-        # 重置回测状态
-        self.capital = self.initial_capital
-        self.position = 0.0
-        self.position_entry_price = 0.0
-        self.trade_history = []
-        self.equity_curve = []
-        self.signals = []
+        # 初始化模拟币安API
+        self.mock_binance = MockBinanceAPI(data, self.initial_capital)
+        
+        # 获取策略配置
+        profile = StrategyProfiles.get_profile(self.strategy_profile)
+        
+        # 创建策略实例（注入模拟币安API）
+        self.strategy = ProfessionalTradingStrategy(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            strategy_type=self.strategy_profile,
+            binance=self.mock_binance,
+            backtest_mode=True
+        )
+        
+        # 应用策略配置
+        self.strategy.strategy_profile = profile
+        self.strategy._load_strategy_config()
         
         # 回测主循环
         total_candles = len(data)
-        for i in range(60, total_candles):  # 从第60根K线开始，确保有足够历史数据
+        for i in range(60, total_candles):
             # 更新进度
             if i % 100 == 0:
                 progress = (i / total_candles) * 100
                 print(f"  回测进度: {progress:.1f}% ({i}/{total_candles})", end="\r")
             
-            # 获取当前K线数据
-            current_time = data['timestamps'].iloc[i]
-            current_price = data['close'].iloc[i]
+            # 设置模拟API的当前索引
+            self.mock_binance.current_index = i
             
-            # 获取历史窗口数据用于分析
-            lookback_data = data.iloc[max(0, i-100):i+1].copy()
+            # 设置策略的回测时间
+            self.strategy.backtest_current_time = data['timestamps'].iloc[i]
             
-            # 生成交易信号
-            signal = self._generate_signal(lookback_data)
+            # 运行策略的一次迭代
+            try:
+                self.strategy.run_once()
+            except Exception as e:
+                print(f"\n  策略执行出错: {e}")
+                import traceback
+                traceback.print_exc()
             
-            # 记录信号
-            signal_record = {
-                "timestamp": current_time,
-                "price": current_price,
-                "signal": signal.get("action", "HOLD"),
-                "confidence": signal.get("confidence", 0.0),
-                "position_size": signal.get("position_size", 0.0)
-            }
-            self.signals.append(signal_record)
-            
-            # 执行交易逻辑
-            self._execute_trading_logic(
-                signal=signal,
-                current_price=current_price,
-                current_time=current_time,
-                position_size_pct=position_size_pct
-            )
-            
-            # 更新权益曲线
-            current_equity = self._calculate_equity(current_price)
-            self.equity_curve.append({
-                "timestamp": current_time,
-                "equity": current_equity,
-                "price": current_price,
-                "position": self.position
-            })
+            # 前进到下一个时间点
+            self.mock_binance.advance()
         
         print(f"\n✓ 回测完成: {len(data)}条K线分析完毕")
         
@@ -302,293 +526,22 @@ class BacktestEngine:
         
         return report
     
-    def _generate_signal(self, data: pd.DataFrame) -> dict:
-        """生成交易信号
-        
-        Args:
-            data: 历史K线数据
-            
-        Returns:
-            交易信号字典
-        """
-        if self.strategy_coordinator is None:
-            return {"action": "HOLD", "confidence": 0.0}
-        
-        try:
-            # 使用策略协调器分析市场
-            analysis_result = self.strategy_coordinator.analyze_market(data)
-            
-            # 提取交易建议
-            recommendation = analysis_result.get("trading_recommendation", {})
-            
-            # 简化信号格式
-            signal = {
-                "action": recommendation.get("action", "HOLD"),
-                "confidence": recommendation.get("confidence", 0.0),
-                "position_size": recommendation.get("position_size", 0.0),
-                "reasoning": recommendation.get("reasoning", []),
-                "signal_strength": recommendation.get("signal_strength", 0.0),
-                "risk_level": recommendation.get("risk_level", "LOW")
-            }
-            
-            return signal
-            
-        except Exception as e:
-            print(f"  信号生成失败: {e}")
-            return {"action": "HOLD", "confidence": 0.0}
-    
-    def _execute_trading_logic(self, 
-                              signal: dict, 
-                              current_price: float,
-                              current_time: datetime,
-                              position_size_pct: float):
-        """执行交易逻辑
-        
-        Args:
-            signal: 交易信号
-            current_price: 当前价格
-            current_time: 当前时间
-            position_size_pct: 仓位比例
-        """
-        action = signal.get("action", "HOLD")
-        confidence = signal.get("confidence", 0.0)
-        
-        # 置信度阈值过滤
-        if confidence < 0.3:
-            action = "HOLD"
-        
-        # 风险等级过滤
-        risk_level = signal.get("risk_level", "LOW")
-        if risk_level == "HIGH":
-            action = "HOLD"
-        
-        # 执行交易
-        if action == "BUY" and self.position <= 0:
-            # 开多仓
-            self._open_long_position(current_price, current_time, position_size_pct)
-            
-        elif action == "SELL" and self.position >= 0:
-            # 开空仓 (简化处理，实际加密货币交易可能需要借贷)
-            # 这里我们简化为平多仓并开空仓
-            if self.position > 0:
-                self._close_position(current_price, current_time, "信号反转")
-            # 开空仓
-            self._open_short_position(current_price, current_time, position_size_pct)
-            
-        elif action == "HOLD":
-            # 持仓管理：检查止损止盈
-            self._manage_position(current_price, current_time)
-    
-    def _open_long_position(self, price: float, time: datetime, position_size_pct: float):
-        """开多仓
-        
-        Args:
-            price: 入场价格
-            time: 入场时间
-            position_size_pct: 仓位比例
-        """
-        if self.position > 0:
-            return  # 已有持仓
-            
-        # 计算交易数量（基于仓位比例）
-        position_value = self.capital * position_size_pct
-        position_amount = position_value / price
-        
-        # 考虑手续费和滑点
-        effective_price = price * (1 + self.slippage)
-        commission = position_value * self.commission_rate
-        
-        # 检查资金是否足够
-        total_cost = position_value + commission
-        if total_cost > self.capital:
-            print(f"  资金不足: 需要${total_cost:.2f}, 可用${self.capital:.2f}")
-            return
-        
-        # 更新持仓
-        self.position = position_amount
-        self.position_entry_price = effective_price
-        self.capital -= total_cost
-        
-        # 记录交易
-        trade_record = {
-            "time": time,
-            "type": "LONG",
-            "entry_price": effective_price,
-            "amount": position_amount,
-            "position_value": position_value,
-            "commission": commission,
-            "current_capital": self.capital,
-            "reason": "策略信号开多仓"
-        }
-        self.trade_history.append(trade_record)
-        
-        print(f"  [{time.strftime('%Y-%m-%d %H:%M')}] 开多仓: {position_amount:.6f} BTC @ ${effective_price:.2f}")
-    
-    def _open_short_position(self, price: float, time: datetime, position_size_pct: float):
-        """开空仓（简化版本，实际需要借贷）
-        
-        Args:
-            price: 入场价格
-            time: 入场时间
-            position_size_pct: 仓位比例
-        """
-        if self.position < 0:
-            return  # 已有空仓
-            
-        # 如果有持仓，先平仓
-        if self.position > 0:
-            self._close_position(price, time, "平多开空")
-        
-        # 计算交易数量（基于仓位比例）
-        position_value = self.capital * position_size_pct
-        position_amount = position_value / price
-        
-        # 考虑手续费和滑点
-        effective_price = price * (1 - self.slippage)  # 做空时价格较低有利
-        commission = position_value * self.commission_rate
-        
-        # 检查资金是否足够
-        total_cost = position_value * 0.5 + commission  # 做空需要保证金
-        if total_cost > self.capital:
-            print(f"  资金不足: 需要${total_cost:.2f}, 可用${self.capital:.2f}")
-            return
-        
-        # 更新持仓（负值表示空仓）
-        self.position = -position_amount
-        self.position_entry_price = effective_price
-        self.capital -= total_cost  # 扣除保证金和手续费
-        
-        # 记录交易
-        trade_record = {
-            "time": time,
-            "type": "SHORT",
-            "entry_price": effective_price,
-            "amount": position_amount,
-            "position_value": position_value,
-            "commission": commission,
-            "current_capital": self.capital,
-            "reason": "策略信号开空仓"
-        }
-        self.trade_history.append(trade_record)
-        
-        print(f"  [{time.strftime('%Y-%m-%d %H:%M')}] 开空仓: {position_amount:.6f} BTC @ ${effective_price:.2f}")
-    
-    def _close_position(self, price: float, time: datetime, reason: str = ""):
-        """平仓
-        
-        Args:
-            price: 平仓价格
-            time: 平仓时间
-            reason: 平仓原因
-        """
-        if self.position == 0:
-            return  # 没有持仓
-            
-        # 计算平仓收益
-        position_amount = abs(self.position)
-        entry_price = self.position_entry_price
-        
-        if self.position > 0:  # 平多仓
-            # 考虑手续费和滑点
-            effective_price = price * (1 - self.slippage)
-            pnl = (effective_price - entry_price) * position_amount
-        else:  # 平空仓
-            # 考虑手续费和滑点
-            effective_price = price * (1 + self.slippage)
-            pnl = (entry_price - effective_price) * position_amount
-        
-        # 手续费
-        position_value = position_amount * effective_price
-        commission = position_value * self.commission_rate
-        
-        # 净收益
-        net_pnl = pnl - commission
-        
-        # 更新资金和持仓
-        self.capital += (position_amount * entry_price) + net_pnl  # 返还本金 + 净收益
-        self.position = 0.0
-        self.position_entry_price = 0.0
-        
-        # 记录交易
-        trade_record = {
-            "time": time,
-            "type": "CLOSE",
-            "exit_price": effective_price,
-            "amount": position_amount,
-            "pnl": pnl,
-            "commission": commission,
-            "net_pnl": net_pnl,
-            "current_capital": self.capital,
-            "reason": reason
-        }
-        self.trade_history.append(trade_record)
-        
-        position_type = "多仓" if self.position > 0 else "空仓"
-        print(f"  [{time.strftime('%Y-%m-%d %H:%M')}] 平{position_type}: 盈利${net_pnl:.2f} ({pnl/position_amount/entry_price*100:.2f}%)")
-    
-    def _manage_position(self, current_price: float, current_time: datetime):
-        """持仓管理：止损止盈检查
-        
-        Args:
-            current_price: 当前价格
-            current_time: 当前时间
-        """
-        if self.position == 0:
-            return
-        
-        entry_price = self.position_entry_price
-        
-        # 计算盈亏百分比
-        if self.position > 0:  # 多仓
-            pnl_pct = (current_price - entry_price) / entry_price
-            # 止损：亏损超过5%
-            if pnl_pct < -0.05:
-                self._close_position(current_price, current_time, "多仓止损")
-            # 止盈：盈利超过10%
-            elif pnl_pct > 0.10:
-                self._close_position(current_price, current_time, "多仓止盈")
-        else:  # 空仓
-            pnl_pct = (entry_price - current_price) / entry_price
-            # 止损：亏损超过5%
-            if pnl_pct < -0.05:
-                self._close_position(current_price, current_time, "空仓止损")
-            # 止盈：盈利超过10%
-            elif pnl_pct > 0.10:
-                self._close_position(current_price, current_time, "空仓止盈")
-    
-    def _calculate_equity(self, current_price: float) -> float:
-        """计算当前权益
-        
-        Args:
-            current_price: 当前价格
-            
-        Returns:
-            当前总权益
-        """
-        position_value = 0.0
-        if self.position > 0:  # 多仓
-            position_value = self.position * current_price
-        elif self.position < 0:  # 空仓
-            position_value = abs(self.position) * (self.position_entry_price - current_price) + abs(self.position) * self.position_entry_price
-        
-        total_equity = self.capital + position_value
-        return total_equity
-    
     def _calculate_performance_metrics(self):
         """计算回测性能指标"""
-        if not self.equity_curve:
+        if not self.mock_binance or not self.mock_binance.equity_curve:
             return
         
         # 提取权益曲线
-        equity_values = [e["equity"] for e in self.equity_curve]
-        returns = np.diff(equity_values) / equity_values[:-1]
+        equity_values = [e["equity"] for e in self.mock_binance.equity_curve]
         
-        if len(returns) == 0:
+        if len(equity_values) < 2:
             return
+        
+        returns = np.diff(equity_values) / equity_values[:-1]
         
         # 基础指标
         total_return = (equity_values[-1] - self.initial_capital) / self.initial_capital
-        annual_return = total_return * (365 / len(self.equity_curve)) if len(self.equity_curve) > 0 else 0
+        annual_return = total_return * (365 / len(equity_values)) if len(equity_values) > 0 else 0
         
         # 风险指标
         volatility = np.std(returns) * np.sqrt(252) if len(returns) > 1 else 0
@@ -600,17 +553,22 @@ class BacktestEngine:
         max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0
         
         # 交易统计
-        trades = self.trade_history
-        total_trades = len([t for t in trades if t["type"] in ["LONG", "SHORT"]])
-        winning_trades = len([t for t in trades if t.get("net_pnl", 0) > 0])
+        trades = self.mock_binance.trade_history
+        open_trades = [t for t in trades if t["type"] in ["OPEN_LONG", "OPEN_SHORT"]]
+        close_trades = [t for t in trades if t["type"] in ["CLOSE_LONG", "CLOSE_SHORT"]]
+        total_trades = len(close_trades)
+        winning_trades = len([t for t in close_trades if t.get("pnl", 0) > 0])
         losing_trades = total_trades - winning_trades
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
         
         # 盈亏统计
-        total_pnl = sum(t.get("net_pnl", 0) for t in trades)
-        avg_win = np.mean([t.get("net_pnl", 0) for t in trades if t.get("net_pnl", 0) > 0]) if winning_trades > 0 else 0
-        avg_loss = np.mean([t.get("net_pnl", 0) for t in trades if t.get("net_pnl", 0) < 0]) if losing_trades > 0 else 0
-        profit_factor = abs(avg_win * winning_trades / (avg_loss * losing_trades)) if losing_trades > 0 and avg_loss != 0 else float('inf')
+        total_pnl = sum(t.get("pnl", 0) for t in close_trades)
+        winning_pnls = [t.get("pnl", 0) for t in close_trades if t.get("pnl", 0) > 0]
+        losing_pnls = [t.get("pnl", 0) for t in close_trades if t.get("pnl", 0) < 0]
+        avg_win = np.mean(winning_pnls) if winning_pnls else 0
+        avg_loss = np.mean(losing_pnls) if losing_pnls else 0
+        
+        profit_factor = abs(avg_win * winning_trades / (avg_loss * losing_trades)) if (losing_trades > 0 and avg_loss != 0) else float('inf')
         
         self.performance_metrics = {
             "total_return": total_return,
@@ -640,6 +598,7 @@ class BacktestEngine:
             "summary": {
                 "symbol": self.symbol,
                 "timeframe": self.timeframe,
+                "strategy_profile": self.strategy_profile,
                 "start_date": self.start_date.strftime("%Y-%m-%d"),
                 "end_date": self.end_date.strftime("%Y-%m-%d"),
                 "initial_capital": self.initial_capital,
@@ -652,9 +611,8 @@ class BacktestEngine:
                 "win_rate_pct": self.performance_metrics.get("win_rate", 0) * 100,
             },
             "performance_metrics": self.performance_metrics,
-            "trade_history": self.trade_history[-20:],  # 返回最近20笔交易
-            "equity_curve_sample": self.equity_curve[::max(1, len(self.equity_curve)//100)],  # 采样100个点
-            "signals_sample": self.signals[::max(1, len(self.signals)//50)],  # 采样50个信号
+            "trade_history": self.mock_binance.trade_history[-20:] if self.mock_binance else [],
+            "equity_curve_sample": self.mock_binance.equity_curve[::max(1, len(self.mock_binance.equity_curve)//100)] if self.mock_binance else [],
             "analysis_timestamp": datetime.now().isoformat()
         }
         
@@ -664,7 +622,7 @@ class BacktestEngine:
         """打印回测报告
         
         Args:
-            report: 回测报告 (如果为None则使用最新报告)
+            report: 回测报告
         """
         if report is None:
             if not self.performance_metrics:
@@ -679,6 +637,7 @@ class BacktestEngine:
         print("回测报告摘要")
         print("="*80)
         print(f"交易品种: {summary.get('symbol', 'N/A')}")
+        print(f"策略预设: {summary.get('strategy_profile', 'N/A')}")
         print(f"时间周期: {summary.get('timeframe', 'N/A')}")
         print(f"回测周期: {summary.get('start_date', 'N/A')} 到 {summary.get('end_date', 'N/A')}")
         print(f"初始资金: ${summary.get('initial_capital', 0):.2f}")
@@ -705,7 +664,7 @@ class BacktestEngine:
         
         Args:
             report: 回测报告
-            filepath: 文件路径 (如果为None则生成默认路径)
+            filepath: 文件路径
         """
         if report is None:
             report = self._generate_backtest_report()
@@ -731,7 +690,7 @@ if __name__ == "__main__":
         symbol="BTCUSDT",
         initial_capital=10000.0,
         timeframe="5m",
-        use_fingpt=True,
+        strategy_profile="trend",
         start_date="2024-01-01",
         end_date="2024-12-31"
     )
@@ -740,7 +699,7 @@ if __name__ == "__main__":
     data = engine.load_historical_data(limit=500)
     
     # 运行回测
-    report = engine.run_backtest(data=data, position_size_pct=0.1)
+    report = engine.run_backtest(data=data)
     
     # 打印报告
     engine.print_report(report)

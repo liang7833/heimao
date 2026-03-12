@@ -113,7 +113,13 @@ class Qwen3Optimizer:
         else:
             base_dir = os.path.dirname(__file__)
         
-        self.model_path = model_path if model_path else os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
+        if model_path:
+            self.model_path = model_path
+        else:
+            # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+            self.model_path = os.path.join(base_dir, "_internal", "models", "Qwen3.5-0.8B-Instruct")
+            if not os.path.exists(self.model_path):
+                self.model_path = os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
         self.max_length = max_length
         
         # 自动选择设备

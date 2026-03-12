@@ -200,40 +200,57 @@ class FinGPTSentimentAnalyzer:
                 else:
                     base_dir = os.path.dirname(__file__)
                 
-                model_path = os.path.join(base_dir, "models", "fingpt-sentiment")
-                model_name = model_path
-                try:
-                    # 首先尝试仅本地加载
-                    self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-                    self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_name, local_files_only=True)
-                    print("  ✓ 从本地缓存加载模型成功")
-                except Exception as local_e:
-                    print(f"  ⚠️ 本地缓存加载失败: {local_e}")
-                    print("  ⚠️ 模型未在本地缓存，FinGPT情绪分析功能将不可用")
+                # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+                model_path = os.path.join(base_dir, "_internal", "models", "fingpt-sentiment")
+                if not os.path.exists(model_path):
+                    model_path = os.path.join(base_dir, "models", "fingpt-sentiment")
+                
+                # 检查模型文件是否存在
+                if not os.path.exists(model_path):
+                    print("  ⚠️ 本地模型目录不存在，将使用基于规则的情绪分析")
                     self.use_local_model = False
-                    raise
-                
-                # 移到GPU（如果可用）
-                import torch
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
-                if self.device == "cuda":
-                    self.sentiment_model = self.sentiment_model.to(self.device)
-                    print(f"  ✓ 模型移至GPU ({torch.cuda.get_device_name(0)})")
                 else:
-                    print("  使用CPU运行")
+                    # 检查必要的模型文件
+                    required_files = ["config.json", "tokenizer_config.json", "vocab.json"]
+                    model_files_exist = all(os.path.exists(os.path.join(model_path, f)) for f in required_files)
+                    
+                    if not model_files_exist:
+                        print("  ⚠️ 本地模型文件不完整，将使用基于规则的情绪分析")
+                        self.use_local_model = False
+                    else:
+                        try:
+                            # 首先尝试仅本地加载
+                            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+                            self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_path, local_files_only=True)
+                            print("  ✓ 从本地缓存加载模型成功")
+                            
+                            # 移到GPU（如果可用）
+                            import torch
+                            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                            if self.device == "cuda":
+                                self.sentiment_model = self.sentiment_model.to(self.device)
+                                print(f"  ✓ 模型移至GPU ({torch.cuda.get_device_name(0)})")
+                            else:
+                                print("  使用CPU运行")
+                            
+                            self.sentiment_pipeline = pipeline(
+                                "sentiment-analysis", 
+                                model=self.sentiment_model, 
+                                tokenizer=self.tokenizer,
+                                device=0 if self.device == "cuda" else -1
+                            )
+                            print("✓ 本地情绪分析模型加载完成")
+                        except Exception as local_e:
+                            print(f"  ⚠️ 本地模型加载失败: {local_e}")
+                            print("  ⚠️ 将使用基于规则的情绪分析")
+                            self.use_local_model = False
                 
-                self.sentiment_pipeline = pipeline(
-                    "sentiment-analysis", 
-                    model=self.sentiment_model, 
-                    tokenizer=self.tokenizer,
-                    device=0 if self.device == "cuda" else -1
-                )
-                print("✓ 本地情绪分析模型加载完成")
             except Exception as e:
-                print(f"本地模型加载失败: {e}")
+                print(f"初始化模型时出错: {e}")
                 print("将使用基于规则的情绪分析")
                 self.use_local_model = False
-        else:
+        
+        if not self.use_local_model:
             print("使用基于规则的情绪分析")
     
     def _load_news_from_crawler_cache(self) -> Optional[List[Dict]]:

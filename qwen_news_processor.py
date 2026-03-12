@@ -105,7 +105,10 @@ class QwenNewsProcessor:
                 base_dir = os.path.dirname(sys.executable)
             else:
                 base_dir = os.path.dirname(__file__)
-            model_path = os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
+            # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
+            model_path = os.path.join(base_dir, "_internal", "models", "Qwen3.5-0.8B-Instruct")
+            if not os.path.exists(model_path):
+                model_path = os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
         
         self.model_path = model_path
         
@@ -120,7 +123,7 @@ class QwenNewsProcessor:
         if QWEN_AVAILABLE and TORCH_AVAILABLE and use_local_model:
             self._initialize_model()
         else:
-            print("[Qwen新闻处理器] 使用规则-based 模式（模型不可用）")
+            #print("[Qwen新闻处理器] 使用规则-based 模式（模型不可用）")
             self.available = True
             self.use_rule_based = True
     
@@ -142,14 +145,14 @@ class QwenNewsProcessor:
                     device_map=self.device
                 )
             else:
-                print(f"[Qwen新闻处理器] 本地模型不存在: {self.model_path}")
-                print("[Qwen新闻处理器] 使用规则-based 模式")
+                #print(f"[Qwen新闻处理器] 本地模型不存在: {self.model_path}")
+                #print("[Qwen新闻处理器] 使用规则-based 模式")
                 self.available = True
                 self.use_rule_based = True
                 return
             
             self.available = True
-            print("[Qwen新闻处理器] 模型加载成功！")
+            #print("[Qwen新闻处理器] 模型加载成功！")
             
         except Exception as e:
             print(f"[Qwen新闻处理器] 模型加载失败: {e}")
@@ -162,9 +165,9 @@ class QwenNewsProcessor:
             if os.path.exists(self.cache_file):
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
                     self.processed_cache = json.load(f)
-                print(f"[Qwen新闻处理器] 已加载缓存: {len(self.processed_cache)} 条新闻")
+                #print(f"[Qwen新闻处理器] 已加载缓存: {len(self.processed_cache)} 条新闻")
         except Exception as e:
-            print(f"[Qwen新闻处理器] 加载缓存失败: {e}")
+            #print(f"[Qwen新闻处理器] 加载缓存失败: {e}")
             self.processed_cache = {}
     
     def _save_cache(self):
@@ -172,7 +175,7 @@ class QwenNewsProcessor:
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(self.processed_cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[Qwen新闻处理器] 保存缓存失败: {e}")
+            pass
     
     def _generate_with_qwen(self, prompt: str, max_new_tokens: int = 500) -> str:
         if self.use_rule_based or not self.model or not self.tokenizer:
@@ -207,7 +210,6 @@ class QwenNewsProcessor:
             response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             return response
         except Exception as e:
-            print(f"[Qwen新闻处理器] 生成失败: {e}")
             return None
     
     def _rule_based_process(self, news: Dict) -> Dict:
@@ -315,10 +317,10 @@ class QwenNewsProcessor:
         cache_key = f"{title}___{url}"
         
         if cache_key in self.processed_cache:
-            print(f"\n[Qwen新闻处理器] 缓存命中，跳过处理: {title[:50]}...")
+            #print(f"\n[Qwen新闻处理器] 缓存命中，跳过处理: {title[:50]}...")
             return self.processed_cache[cache_key]
         
-        print(f"\n[Qwen新闻处理器] 处理新闻: {title[:50]}...")
+        #print(f"\n[Qwen新闻处理器] 处理新闻: {title[:50]}...")
         
         if self.use_rule_based:
             result = self._rule_based_process(news)
@@ -372,15 +374,15 @@ class QwenNewsProcessor:
                     self.processed_cache[cache_key] = result
                     return result
             except Exception as e:
-                print(f"  [Qwen新闻处理器] 解析失败: {e}")
+                pass
         
-        print(f"  [Qwen新闻处理器] 回退到规则模式")
+        #print(f"  [Qwen新闻处理器] 回退到规则模式")
         result = self._rule_based_process(news)
         self.processed_cache[cache_key] = result
         return result
     
     def process_news_batch(self, news_list: List[Dict]) -> List[Dict]:
-        print(f"\n[Qwen新闻处理器] 开始处理 {len(news_list)} 条新闻...")
+        #print(f"\n[Qwen新闻处理器] 开始处理 {len(news_list)} 条新闻...")
         
         processed_news = []
         for news in news_list:
@@ -400,7 +402,7 @@ class QwenNewsProcessor:
                     "url": news.get("url", "")
                 })
         
-        print(f"[Qwen新闻处理器] 处理完成: 保留 {len(processed_news)}/{len(news_list)} 条新闻")
+        #print(f"[Qwen新闻处理器] 处理完成: 保留 {len(processed_news)}/{len(news_list)} 条新闻")
         self._save_cache()
         return processed_news
 
