@@ -599,10 +599,13 @@ class EnhancedKronosAnalyzer:
 
         # 3. ATR(14)
         tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
+        # 正确计算：第一行只用 high - low，从第二行开始才用前一根K线的close
+        tr2 = np.zeros_like(high)
+        tr3 = np.zeros_like(high)
+        if len(close) > 1:
+            tr2[1:] = np.abs(high[1:] - close[:-1])
+            tr3[1:] = np.abs(low[1:] - close[:-1])
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = 0
         df["ATR14"] = pd.Series(tr).rolling(window=14).mean().values
 
         # 4. 振幅
@@ -621,12 +624,16 @@ class EnhancedKronosAnalyzer:
         loss = (-delta.where(delta < 0, 0))
         avg_gain14 = gain.rolling(window=14).mean()
         avg_loss14 = loss.rolling(window=14).mean()
-        rs14 = avg_gain14 / avg_loss14
+        # 防止除零：用很小的数代替0
+        avg_loss14_safe = avg_loss14.replace(0, 0.00001)
+        rs14 = avg_gain14 / avg_loss14_safe
         df["RSI14"] = (100 - (100 / (1 + rs14))).values
 
         avg_gain7 = gain.rolling(window=7).mean()
         avg_loss7 = loss.rolling(window=7).mean()
-        rs7 = avg_gain7 / avg_loss7
+        # 防止除零：用很小的数代替0
+        avg_loss7_safe = avg_loss7.replace(0, 0.00001)
+        rs7 = avg_gain7 / avg_loss7_safe
         df["RSI7"] = (100 - (100 / (1 + rs7))).values
 
         # 8. MACD线 和 MACD柱
@@ -806,14 +813,14 @@ class EnhancedKronosAnalyzer:
             # 基于预测波动率动态计算止盈止损
             pred_volatility = np.std(pred_prices) / np.mean(pred_prices) if len(pred_prices) > 1 else 0.008
             
-            # 止损 = 1.5 * ATR 或 0.8% 取较大者（保护本金）
-            sl_pct = max(1.5 * atr_pct, 0.008)
+            # 止损 = 1.0 * ATR 或 0.8% 取较大者（保护本金）
+            sl_pct = max(1.0 * atr_pct, 0.008)
             
-            # 止盈1 = 1.2 * ATR（保守）
-            tp1_pct = max(1.2 * atr_pct, 0.006)
+            # 止盈1 = 1.5 * ATR（保守，风险收益比1.5）
+            tp1_pct = max(1.5 * atr_pct, 0.012)
             
-            # 止盈2 = 2.5 * ATR（激进）
-            tp2_pct = max(2.5 * atr_pct, 0.015)
+            # 止盈2 = 2.5 * ATR（激进，风险收益比2.5）
+            tp2_pct = max(2.5 * atr_pct, 0.020)
             
             print(f"  [Kronos止盈止损计算]")
             print(f"    ATR: {atr_value:.2f} ({atr_pct*100:.2f}%)")

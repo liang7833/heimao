@@ -46,7 +46,6 @@ class ProfessionalTradingStrategy:
         threshold=None,
         strategy_type="trend",
         min_position=None,
-        ai_min_trend=None,
         ai_min_deviation=None,
         max_funding=None,
         min_funding=None,
@@ -84,11 +83,6 @@ class ProfessionalTradingStrategy:
         )
         self.strategy_type = strategy_type
         self.min_position = min_position or 100.0
-        self.ai_min_trend = (
-            ai_min_trend
-            if ai_min_trend is not None
-            else float(os.getenv("AI_MIN_TREND", "0.010"))
-        )
         self.ai_min_deviation = (
             ai_min_deviation
             if ai_min_deviation is not None
@@ -124,6 +118,7 @@ class ProfessionalTradingStrategy:
         # 开仓后计时参数
         self.post_entry_hours = strategy_config_dict.get("post_entry_hours", 2.0)
         self.take_profit_min_pct = strategy_config_dict.get("take_profit_min_pct", 0.6)
+        self.force_stop_loss_pct = strategy_config_dict.get("force_stop_loss_pct", -3.0)
         self.post_entry_time = None  # 开仓时间
         self.post_entry_entry_count = 0  # 开仓后连续同向信号计数
         self.initial_position_size = 0  # 初始开仓仓位大小
@@ -262,14 +257,6 @@ class ProfessionalTradingStrategy:
         self.prediction_history = []
         self.current_prediction = None
         
-        # 自适应参数优化
-        self.adaptive_params = {
-            "threshold": self.threshold,
-            "entry_confirm_count": self.entry_confirm_count,
-            "reverse_confirm_count": self.reverse_confirm_count,
-            "last_optimization": datetime.now()
-        }
-
         # 保存默认参数（用于恢复）
         self._save_default_parameters()
 
@@ -278,9 +265,8 @@ class ProfessionalTradingStrategy:
         self.strategy_coordinator = None
         self._initialize_multi_agent_system()
 
-        # 只有非回测模式才初始化真实币安API余额
-        if not self.backtest_mode:
-            self._initialize_balance()
+        # 初始化余额和风险管理器（回测模式也需要）
+        self._initialize_balance()
 
     def _log(self, message):
         """统一的日志输出方法，根据backtest_mode选择输出方式"""
@@ -309,6 +295,10 @@ class ProfessionalTradingStrategy:
             if "TREND_STRENGTH_THRESHOLD" in basic:
                 self.threshold = basic["TREND_STRENGTH_THRESHOLD"]
                 self._log(f"  ✓ TREND_STRENGTH_THRESHOLD: {self.threshold}")
+                if "ai_filter" not in profile:
+                    profile["ai_filter"] = {}
+                profile["ai_filter"]["min_trend_strength"] = self.threshold
+                self._log(f"  ✓ 同步到 ai_filter.min_trend_strength: {self.threshold}")
             
             if "CHECK_INTERVAL" in basic:
                 self.interval = basic["CHECK_INTERVAL"]
@@ -385,6 +375,18 @@ class ProfessionalTradingStrategy:
                 if "take_profit_min_pct" in strategy:
                     self.take_profit_min_pct = strategy["take_profit_min_pct"]
                     self._log(f"  ✓ take_profit_min_pct: {self.take_profit_min_pct}")
+                
+                if "force_stop_loss_pct" in strategy:
+                    self.force_stop_loss_pct = strategy["force_stop_loss_pct"]
+                    self._log(f"  ✓ force_stop_loss_pct: {self.force_stop_loss_pct}")
+            
+            # 加载策略协调器配置
+            coordinator = profile.get("coordinator", {})
+            if coordinator:
+                if hasattr(self, 'strategy_coordinator') and self.strategy_coordinator:
+                    if hasattr(self.strategy_coordinator, 'update_config'):
+                        self.strategy_coordinator.update_config(coordinator)
+                        self._log(f"  ✓ 策略协调器配置已加载: {coordinator}")
             
             # 同步风险管理器配置
             self._sync_risk_manager_config()
@@ -405,6 +407,7 @@ class ProfessionalTradingStrategy:
         try:
             self._log("[策略配置] 正在动态更新配置...")
             
+            # 首先更新 strategy_profile，确保所有配置都同步保存
             basic = config.get("basic", {})
             entry = config.get("entry", {})
             stop_loss = config.get("stop_loss", {})
@@ -413,6 +416,53 @@ class ProfessionalTradingStrategy:
             frequency = config.get("frequency", {})
             position = config.get("position", {})
             strategy = config.get("strategy", {})
+            coordinator = config.get("coordinator", {})
+            
+            # 更新 strategy_profile 中的各个分类
+            if basic:
+                if "basic" not in self.strategy_profile:
+                    self.strategy_profile["basic"] = {}
+                self.strategy_profile["basic"].update(basic)
+            
+            if entry:
+                if "entry" not in self.strategy_profile:
+                    self.strategy_profile["entry"] = {}
+                self.strategy_profile["entry"].update(entry)
+            
+            if stop_loss:
+                if "stop_loss" not in self.strategy_profile:
+                    self.strategy_profile["stop_loss"] = {}
+                self.strategy_profile["stop_loss"].update(stop_loss)
+            
+            if take_profit:
+                if "take_profit" not in self.strategy_profile:
+                    self.strategy_profile["take_profit"] = {}
+                self.strategy_profile["take_profit"].update(take_profit)
+            
+            if risk:
+                if "risk" not in self.strategy_profile:
+                    self.strategy_profile["risk"] = {}
+                self.strategy_profile["risk"].update(risk)
+            
+            if frequency:
+                if "frequency" not in self.strategy_profile:
+                    self.strategy_profile["frequency"] = {}
+                self.strategy_profile["frequency"].update(frequency)
+            
+            if position:
+                if "position" not in self.strategy_profile:
+                    self.strategy_profile["position"] = {}
+                self.strategy_profile["position"].update(position)
+            
+            if strategy:
+                if "strategy" not in self.strategy_profile:
+                    self.strategy_profile["strategy"] = {}
+                self.strategy_profile["strategy"].update(strategy)
+            
+            if coordinator:
+                if "coordinator" not in self.strategy_profile:
+                    self.strategy_profile["coordinator"] = {}
+                self.strategy_profile["coordinator"].update(coordinator)
             
             # 更新基础参数
             if "LEVERAGE" in basic:
@@ -429,6 +479,10 @@ class ProfessionalTradingStrategy:
             if "TREND_STRENGTH_THRESHOLD" in basic:
                 self.threshold = basic["TREND_STRENGTH_THRESHOLD"]
                 self._log(f"  ✓ TREND_STRENGTH_THRESHOLD 更新为: {self.threshold}")
+                if "ai_filter" not in self.strategy_profile:
+                    self.strategy_profile["ai_filter"] = {}
+                self.strategy_profile["ai_filter"]["min_trend_strength"] = self.threshold
+                self._log(f"  ✓ 同步到 ai_filter.min_trend_strength: {self.threshold}")
             
             if "LOOKBACK_PERIOD" in basic:
                 self.lookback_period = basic["LOOKBACK_PERIOD"]
@@ -518,6 +572,16 @@ class ProfessionalTradingStrategy:
                 if "take_profit_min_pct" in strategy:
                     self.take_profit_min_pct = strategy["take_profit_min_pct"]
                     self._log(f"  ✓ take_profit_min_pct 更新为: {self.take_profit_min_pct}")
+                
+                if "force_stop_loss_pct" in strategy:
+                    self.force_stop_loss_pct = strategy["force_stop_loss_pct"]
+                    self._log(f"  ✓ force_stop_loss_pct 更新为: {self.force_stop_loss_pct}")
+            
+            # 更新策略协调器配置
+            if coordinator and hasattr(self, 'strategy_coordinator') and self.strategy_coordinator:
+                if hasattr(self.strategy_coordinator, 'update_config'):
+                    self.strategy_coordinator.update_config(coordinator)
+                    self._log(f"  ✓ 策略协调器配置已更新: {coordinator}")
             
             self._log("[策略配置] 动态配置更新完成！")
             return True
@@ -570,6 +634,13 @@ class ProfessionalTradingStrategy:
                 fingpt_analyzer=self.fingpt_analyzer
             )
             self._log("  ✓ 策略协调器初始化完成")
+            
+            # 策略协调器初始化后，立即从strategy_profile加载配置
+            coordinator_config = self.strategy_profile.get("coordinator", {})
+            if coordinator_config:
+                if hasattr(self.strategy_coordinator, 'update_config'):
+                    self.strategy_coordinator.update_config(coordinator_config)
+                    self._log(f"  ✓ 策略协调器配置已加载: {coordinator_config}")
             
             # 将多智能体系统实例传递给Kronos分析器
             self.analyzer.fingpt_analyzer = self.fingpt_analyzer
@@ -755,8 +826,13 @@ class ProfessionalTradingStrategy:
 
     def get_total_balance(self):
         """获取合约账户总资金（包含可用+持仓盈亏）"""
-        # 回测模式下直接返回 current_balance
+        # 回测模式下从模拟API获取当前权益
         if self.backtest_mode:
+            if hasattr(self.binance, 'calculate_current_equity'):
+                self.current_balance = self.binance.calculate_current_equity()
+                # 更新风险管理器的余额
+                if self.risk_manager:
+                    self.risk_manager.update_balance(self.current_balance)
             return self.current_balance
         
         try:
@@ -844,70 +920,7 @@ class ProfessionalTradingStrategy:
 
         return True, "风控检查通过"
 
-    def _adaptive_parameter_optimization(self, df):
-        """自适应参数优化"""
-        from datetime import datetime, timedelta
-        
-        # 回测模式下不进行自适应优化（避免影响回测结果）
-        if self.backtest_mode:
-            return
-        
-        # 每30分钟优化一次参数
-        if datetime.now() - self.adaptive_params["last_optimization"] < timedelta(minutes=30):
-            return
-            
-        self._log("\n[自适应优化] 开始参数优化...")
-        
-        # 分析市场波动性
-        volatility = df["close"].pct_change().std()
-        
-        # 根据波动性调整阈值
-        if volatility > 0.02:  # 高波动市场
-            new_threshold = min(self.threshold * 1.5, 0.03)
-            self._log(f"  高波动市场，阈值调整: {self.threshold:.4f} -> {new_threshold:.4f}")
-            self.threshold = new_threshold
-        elif volatility < 0.005:  # 低波动市场
-            new_threshold = max(self.threshold * 0.7, 0.005)
-            self._log(f"  低波动市场，阈值调整: {self.threshold:.4f} -> {new_threshold:.4f}")
-            self.threshold = new_threshold
-            
-        # 根据预测准确性调整确认次数
-        if len(self.prediction_history) >= 10:
-            recent_predictions = self.prediction_history[-10:]
-            accuracy_rate = sum(1 for p in recent_predictions if p.get('direction_correct', False)) / 10
-            
-            if accuracy_rate > 0.7:  # 高准确率
-                new_entry_count = max(1, self.entry_confirm_count - 1)
-                new_reverse_count = max(1, self.reverse_confirm_count - 1)
-                self._log(f"  高准确率({accuracy_rate:.1%})，确认次数减少: {self.entry_confirm_count}->{new_entry_count}")
-                self.entry_confirm_count = new_entry_count
-                self.reverse_confirm_count = new_reverse_count
-            elif accuracy_rate < 0.3:  # 低准确率
-                new_entry_count = min(5, self.entry_confirm_count + 1)
-                new_reverse_count = min(5, self.reverse_confirm_count + 1)
-                self._log(f"  低准确率({accuracy_rate:.1%})，确认次数增加: {self.entry_confirm_count}->{new_entry_count}")
-                self.entry_confirm_count = new_entry_count
-                self.reverse_confirm_count = new_reverse_count
-        
-        self.adaptive_params.update({
-            "threshold": self.threshold,
-            "entry_confirm_count": self.entry_confirm_count,
-            "reverse_confirm_count": self.reverse_confirm_count,
-            "last_optimization": datetime.now()
-        })
-        
-        # 性能反馈循环：记录优化历史
-        if len(self.prediction_history) >= 5:
-            recent_accuracy = sum(1 for p in self.prediction_history[-5:] if p.get('direction_correct', False)) / 5
-            self._log(f"[性能反馈] 最近5次预测准确率: {recent_accuracy:.1%}")
-            
-            # 如果连续表现不佳，考虑策略切换
-            if recent_accuracy < 0.2 and len(self.prediction_history) >= 20:
-                last_20_accuracy = sum(1 for p in self.prediction_history[-20:] if p.get('direction_correct', False)) / 20
-                if last_20_accuracy < 0.3:
-                    self._log("⚠️ 警告: 预测准确率持续偏低，建议检查策略有效性")
-        
-        self._log("[自适应优化] 参数优化完成")
+
 
     def _determine_effective_strategy(self, df, signal):
         """根据市场状态和时间确定有效策略 - 需要2次连续确认"""
@@ -2355,7 +2368,7 @@ class ProfessionalTradingStrategy:
                 pass
 
             # 4. 亏损过大强制平仓
-            if not should_close and position_pnl_pct < -3:
+            if not should_close and position_pnl_pct < self.force_stop_loss_pct:
                 should_close = True
                 close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
                 print(f"  ⚡ 亏损过大，强制平仓")
@@ -2428,8 +2441,7 @@ class ProfessionalTradingStrategy:
             else:
                 print(f"市场波动性检查: {volatility_msg}")
 
-        # 自适应参数优化
-        self._adaptive_parameter_optimization(df)
+
 
         if self.check_extreme_move(df):
             print("检测到极端行情，暂停开仓")
@@ -2687,7 +2699,7 @@ class ProfessionalTradingStrategy:
         print("-" * 60)
 
         # 1. 趋势强度检查（使用策略配置的最小趋势强度）
-        trend_min_threshold = ai_filter.get("min_trend_strength", self.ai_min_trend)
+        trend_min_threshold = ai_filter.get("min_trend_strength", self.threshold)
         trend_ok = signal["trend_strength"] >= trend_min_threshold
         print(
             f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} 最小要求 {trend_min_threshold}"
@@ -2766,6 +2778,41 @@ class ProfessionalTradingStrategy:
 
         effective_threshold = self.threshold
 
+        # Alpha信号增强检查（震荡策略：宽松）
+        is_alpha_signal = signal.get("is_alpha_signal", False)
+        alpha_score = signal.get("alpha_score", 0)
+        confidence_level = signal.get("confidence_level", "LOW")
+        signal_category = signal.get("signal_category", "UNKNOWN")
+        market_state = signal.get("market_state", "neutral")
+
+        if is_alpha_signal:
+            print(
+                f"Alpha信号检测: score={alpha_score:.3f}, confidence={confidence_level}, category={signal_category}, market={market_state}"
+            )
+
+            # 震荡策略：非常宽松的Alpha信号处理
+            # 只有极弱的信号才过滤
+            if alpha_score <= 0.1:
+                effective_threshold *= 2.0  # 极弱Alpha信号大幅提高阈值要求
+                print(
+                    f"极弱Alpha信号({alpha_score:.3f})，阈值调整为{effective_threshold:.4f}"
+                )
+            elif alpha_score <= 0.2:
+                effective_threshold *= 1.3  # 弱Alpha信号小幅提高阈值要求
+                print(
+                    f"弱Alpha信号({alpha_score:.3f})，阈值调整为{effective_threshold:.4f}"
+                )
+            elif alpha_score >= 0.6:
+                effective_threshold *= 0.9  # 强Alpha信号小幅降低阈值要求
+                print(
+                    f"强Alpha信号({alpha_score:.3f})，阈值调整为{effective_threshold:.4f}"
+                )
+
+            # 震荡策略：只过滤最低置信度
+            if confidence_level == "VERY_LOW" and alpha_score <= 0.1:
+                print(f"置信度过低且Alpha分数极低，跳过信号")
+                return False
+
         print("=" * 60)
         print("震荡套利入场条件检查:")
         print("-" * 60)
@@ -2814,12 +2861,45 @@ class ProfessionalTradingStrategy:
         
         effective_threshold = self.threshold
 
+        # Alpha信号增强检查（消息突破策略：中等）
+        is_alpha_signal = signal.get("is_alpha_signal", False)
+        alpha_score = signal.get("alpha_score", 0)
+        confidence_level = signal.get("confidence_level", "LOW")
+        signal_category = signal.get("signal_category", "UNKNOWN")
+        market_state = signal.get("market_state", "neutral")
+
+        if is_alpha_signal:
+            print(
+                f"Alpha信号检测: score={alpha_score:.3f}, confidence={confidence_level}, category={signal_category}, market={market_state}"
+            )
+
+            # 消息突破策略：中等严格的Alpha信号处理
+            if alpha_score >= 0.7:
+                effective_threshold *= 0.85  # 强Alpha信号降低阈值要求
+                print(
+                    f"强Alpha信号({alpha_score:.3f})，阈值调整为{effective_threshold:.4f}"
+                )
+            elif alpha_score <= 0.25:
+                effective_threshold *= 1.4  # 弱Alpha信号提高阈值要求
+                print(
+                    f"弱Alpha信号({alpha_score:.3f})，阈值调整为{effective_threshold:.4f}"
+                )
+
+            # 消息突破策略：过滤VERY_LOW和LOW置信度
+            if confidence_level == "VERY_LOW":
+                print(f"置信度过低({confidence_level})，跳过信号")
+                return False
+
+            if confidence_level == "LOW" and alpha_score <= 0.3:
+                print(f"低置信度({confidence_level})且Alpha分数低，跳过信号")
+                return False
+
         print("=" * 60)
         print("消息突破入场条件检查:")
         print("-" * 60)
 
         # 1. 趋势强度检查（使用策略配置的最小趋势强度）
-        trend_min_threshold = ai_filter.get("min_trend_strength", self.ai_min_trend)
+        trend_min_threshold = ai_filter.get("min_trend_strength", self.threshold)
         trend_ok = signal["trend_strength"] >= trend_min_threshold
         print(
             f"  [1] 趋势强度: {signal['trend_strength']:.4f} {'✓' if trend_ok else '✗'} 最小要求 {trend_min_threshold}"
@@ -3313,7 +3393,7 @@ class ProfessionalTradingStrategy:
                     self.consecutive_reverse_count = 1
                     self.last_reverse_signal = "long"
             
-            if not should_close and position_pnl_pct < -3:
+            if not should_close and position_pnl_pct < self.force_stop_loss_pct:
                 should_close = True
                 close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
             
@@ -3364,7 +3444,7 @@ class ProfessionalTradingStrategy:
                 except:
                     volatility_ok = True
             
-            self._adaptive_parameter_optimization(df)
+
             
             extreme_ok = True
             if len(df) >= 2:
@@ -4195,7 +4275,7 @@ class EnhancedRiskManager:
                 else:
                     pass
             
-            if not should_close and position_pnl_pct < -3:
+            if not should_close and position_pnl_pct < self.force_stop_loss_pct:
                 should_close = True
                 close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
             
@@ -4723,7 +4803,7 @@ class EnhancedRiskManager:
                 else:
                     pass
             
-            if not should_close and position_pnl_pct < -3:
+            if not should_close and position_pnl_pct < self.force_stop_loss_pct:
                 should_close = True
                 close_reason = f"亏损过大 ({position_pnl_pct:.2f}%)"
             

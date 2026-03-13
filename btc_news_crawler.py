@@ -95,7 +95,7 @@ class BTCNewsCrawler:
             "binance": {
                 "name": "币安公告",
                 "url": "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
-                "enabled": True
+                "enabled": False
             }
         }
     

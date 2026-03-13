@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore")
 try:
     from backtest_engine import BacktestEngine
     from strategy_optimizer import StrategyOptimizer
-    from qwen3_optimizer import Qwen3Optimizer
     from binance_api import BinanceAPI
     import pandas as pd
     import numpy as np
@@ -29,8 +28,6 @@ class AutoOptimizationPipeline:
     def __init__(self, 
                  symbol: str = "BTCUSDT",
                  config_path: str = "strategy_config.py",
-                 qwen_model_name: str = "Qwen/Qwen3.5-0.8B-Instruct",  # Qwen3.5-0.8B参数，更轻量快速
-                 enable_qwen: bool = True,
                  optimization_history_file: str = "auto_optimization_history.json"):
         """
         初始化自动化优化管道
@@ -38,20 +35,15 @@ class AutoOptimizationPipeline:
         Args:
             symbol: 交易品种
             config_path: 策略配置文件路径
-            qwen_model_name: Qwen3模型名称
-            enable_qwen: 是否启用Qwen3优化
             optimization_history_file: 优化历史记录文件
         """
         self.symbol = symbol
         self.config_path = config_path
-        self.qwen_model_name = qwen_model_name
-        self.enable_qwen = enable_qwen
         self.history_file = optimization_history_file
         
         # 优化组件
         self.backtest_engine = None
         self.strategy_optimizer = None
-        self.qwen_optimizer = None
         self.binance_api = None
         
         # 优化状态
@@ -73,7 +65,6 @@ class AutoOptimizationPipeline:
         self._initialize_components()
         
         print(f"自动化优化管道初始化完成: {symbol}")
-        print(f"Qwen3优化: {'启用' if enable_qwen else '禁用'}")
     
     def _initialize_components(self):
         """初始化优化组件"""
@@ -83,35 +74,6 @@ class AutoOptimizationPipeline:
             
             print("  初始化策略优化器...")
             self.strategy_optimizer = StrategyOptimizer(self.config_path)
-            
-            if self.enable_qwen:
-                print(f"  初始化Qwen3优化器 ({self.qwen_model_name})...")
-                try:
-                    # 兼容 PyInstaller 打包环境
-                    if getattr(sys, 'frozen', False):
-                        base_dir = os.path.dirname(sys.executable)
-                    else:
-                        base_dir = os.path.dirname(__file__)
-                    
-                    # 检查 _internal/models 目录（打包环境），如果不存在再检查 models 目录
-                    model_path = os.path.join(base_dir, "_internal", "models", "Qwen3.5-0.8B-Instruct")
-                    if not os.path.exists(model_path):
-                        model_path = os.path.join(base_dir, "models", "Qwen3.5-0.8B-Instruct")
-                    
-                    self.qwen_optimizer = Qwen3Optimizer(
-                        model_path=model_path,
-                        device=None,  # 自动选择
-                        max_length=2048
-                    )
-                    if not self.qwen_optimizer.is_loaded:
-                        print("  ⚠️ Qwen3模型加载失败: 模型未在本地缓存")
-                        print(f"  模型名称: {self.qwen_model_name}")
-                        print(f"  下载命令: huggingface-cli download Qwen/Qwen3.5-0.8B-Instruct --local-dir models/Qwen3.5-0.8B-Instruct")
-                        print("  ⚠️ 将使用传统优化器（无AI优化）")
-                        self.enable_qwen = False
-                except Exception as e:
-                    print(f"  ⚠️ Qwen3初始化失败: {e}")
-                    self.enable_qwen = False
             
             print("  ✓ 优化组件初始化完成")
             
@@ -197,38 +159,27 @@ class AutoOptimizationPipeline:
             optimization_record["steps"].append(step3_result)
             print(f"✓ 步骤3完成: {step3_result.get('description')}")
             
-            # 步骤4: AI优化（如果启用）
-            step4_result = None
-            if self.enable_qwen and self.qwen_optimizer and self.qwen_optimizer.is_loaded:
-                step4_result = self._step4_ai_optimization(step2_result["backtest_results"])
-                if step4_result and step4_result.get("success"):
-                    optimization_record["steps"].append(step4_result)
-                    print(f"✓ 步骤4完成: {step4_result.get('description')}")
-                else:
-                    print("⚠️ AI优化跳过或失败，继续使用传统优化结果")
+            # 步骤4: 整合优化结果
+            step4_result = self._step4_integrate_results(step3_result)
+            optimization_record["steps"].append(step4_result)
+            print(f"✓ 步骤4完成: {step4_result.get('description')}")
             
-            # 步骤5: 整合优化结果
-            step5_result = self._step5_integrate_results(step3_result, step4_result)
-            optimization_record["steps"].append(step5_result)
-            print(f"✓ 步骤5完成: {step5_result.get('description')}")
-            
-            # 步骤6: 生成优化报告
-            step6_result = self._step6_generate_report(
+            # 步骤5: 生成优化报告
+            step5_result = self._step5_generate_report(
                 step2_result["backtest_results"],
                 step3_result,
-                step4_result,
-                step5_result
+                step4_result
             )
-            optimization_record["steps"].append(step6_result)
-            optimization_record["final_report"] = step6_result.get("report", {})
+            optimization_record["steps"].append(step5_result)
+            optimization_record["final_report"] = step5_result.get("report", {})
             
-            # 步骤7: 应用优化参数（可选）
-            step7_result = self._step7_apply_parameters(step5_result.get("integrated_parameters", {}))
-            if step7_result.get("success"):
-                optimization_record["steps"].append(step7_result)
-                print(f"✓ 步骤7完成: {step7_result.get('description')}")
+            # 步骤6: 应用优化参数（可选）
+            step6_result = self._step6_apply_parameters(step4_result.get("integrated_parameters", {}))
+            if step6_result.get("success"):
+                optimization_record["steps"].append(step6_result)
+                print(f"✓ 步骤6完成: {step6_result.get('description')}")
             else:
-                print(f"⚠️ 参数应用失败: {step7_result.get('error')}")
+                print(f"⚠️ 参数应用失败: {step6_result.get('error')}")
             
             # 完成优化
             optimization_record["success"] = True
@@ -360,58 +311,13 @@ class AutoOptimizationPipeline:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def _step4_ai_optimization(self, backtest_results: Dict) -> Dict:
-        """步骤4: AI优化（Qwen3）"""
+    def _step4_integrate_results(self, traditional_result: Dict) -> Dict:
+        """步骤4: 整合优化结果"""
         try:
-            print("\n[步骤4] AI优化分析...")
-            
-            if not self.qwen_optimizer or not self.qwen_optimizer.is_loaded:
-                return {"success": False, "error": "Qwen3优化器不可用"}
-            
-            # 使用Qwen3分析回测结果
-            analysis_result = self.qwen_optimizer.analyze_backtest_results(backtest_results)
-            
-            if not analysis_result.get("success"):
-                return {"success": False, "error": analysis_result.get("error", "AI分析失败")}
-            
-            # 使用Qwen3优化参数
-            optimization_result = self.qwen_optimizer.optimize_parameters(
-                backtest_results=backtest_results,
-                strategy_type="trend_following",  # 默认策略类型
-                target_metric="sharpe_ratio"
-            )
-            
-            result = {
-                "success": True,
-                "description": "AI优化分析完成",
-                "analysis_result": analysis_result,
-                "optimization_result": optimization_result,
-                "recommended_parameters": optimization_result.get("recommended_parameters", {}),
-                "analysis_suggestions": analysis_result.get("analysis", {})
-            }
-            
-            return result
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def _step5_integrate_results(self, traditional_result: Dict, ai_result: Dict = None) -> Dict:
-        """步骤5: 整合优化结果"""
-        try:
-            print("\n[步骤5] 整合优化结果...")
+            print("\n[步骤4] 整合优化结果...")
             
             # 基础推荐参数
-            base_params = traditional_result.get("recommended_parameters", {})
-            
-            # 如果AI优化结果可用，整合AI建议
-            integrated_params = base_params.copy()
-            
-            if ai_result and ai_result.get("success"):
-                ai_params = ai_result.get("recommended_parameters", {})
-                
-                # 合并参数（AI参数优先）
-                for key, value in ai_params.items():
-                    integrated_params[key] = value
+            integrated_params = traditional_result.get("recommended_parameters", {}).copy()
             
             # 添加时间戳
             integrated_params["_last_optimized"] = datetime.now().isoformat()
@@ -421,8 +327,7 @@ class AutoOptimizationPipeline:
                 "success": True,
                 "description": f"整合完成: {len(integrated_params)} 个参数",
                 "integrated_parameters": integrated_params,
-                "traditional_parameters": traditional_result.get("recommended_parameters", {}),
-                "ai_parameters": ai_result.get("recommended_parameters", {}) if ai_result else {}
+                "traditional_parameters": traditional_result.get("recommended_parameters", {})
             }
             
             return result
@@ -430,13 +335,12 @@ class AutoOptimizationPipeline:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def _step6_generate_report(self, backtest_results: Dict, 
+    def _step5_generate_report(self, backtest_results: Dict, 
                               traditional_result: Dict, 
-                              ai_result: Dict, 
                               integration_result: Dict) -> Dict:
-        """步骤6: 生成优化报告"""
+        """步骤5: 生成优化报告"""
         try:
-            print("\n[步骤6] 生成优化报告...")
+            print("\n[步骤5] 生成优化报告...")
             
             backtest_summary = backtest_results.get("summary", {})
             
@@ -454,11 +358,6 @@ class AutoOptimizationPipeline:
                     "traditional_optimization": {
                         "suggestions": traditional_result.get("optimization_suggestions", []),
                         "recommended_parameters": traditional_result.get("recommended_parameters", {})
-                    },
-                    "ai_optimization": {
-                        "available": ai_result is not None and ai_result.get("success"),
-                        "suggestions": ai_result.get("analysis_suggestions", {}) if ai_result else {},
-                        "recommended_parameters": ai_result.get("recommended_parameters", {}) if ai_result else {}
                     },
                     "final_recommendations": {
                         "integrated_parameters": integration_result.get("integrated_parameters", {}),
@@ -484,10 +383,10 @@ class AutoOptimizationPipeline:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def _step7_apply_parameters(self, parameters: Dict) -> Dict:
-        """步骤7: 应用优化参数（可选步骤）"""
+    def _step6_apply_parameters(self, parameters: Dict) -> Dict:
+        """步骤6: 应用优化参数（可选步骤）"""
         try:
-            print("\n[步骤7] 应用优化参数...")
+            print("\n[步骤6] 应用优化参数...")
             
             if not parameters:
                 return {"success": False, "error": "无参数可应用"}

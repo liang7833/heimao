@@ -87,13 +87,21 @@ class BinanceAPI:
             server_ts = server_time["serverTime"]
             local_ts = int(time.time() * 1000)
             time_diff = server_ts - local_ts
+            
+            # 增加一些额外的缓冲时间，特别是当本地时间比服务器快时
+            # 如果本地时间比服务器快超过1000ms，增加额外的负偏移量
+            if time_diff < -1000:
+                time_diff -= 2000  # 增加2秒的额外缓冲
+                print(f"检测到本地时间比服务器快，增加额外缓冲: {time_diff}ms")
+            else:
+                print(f"时间同步完成，偏移: {time_diff}ms")
+            
             self.timestamp_offset = time_diff
             self.client.timestamp_offset = time_diff
-            print(f"时间同步完成，偏移: {time_diff}ms")
         except Exception as e:
             print(f"时间同步失败: {e}")
-            self.timestamp_offset = 0
-            self.client.timestamp_offset = 0
+            self.timestamp_offset = -2000  # 默认设置一个负偏移量，以防万一
+            self.client.timestamp_offset = -2000
 
     def _init_client(self):
         requests_params = {"timeout": 60}
@@ -551,7 +559,27 @@ class BinanceAPI:
                 return total_balance
             return None
         except Exception as e:
-            print(f"获取总资金错误: {e}")
+            error_str = str(e)
+            print(f"获取总资金错误: {error_str}")
+            
+            # 检查是否是时间戳错误（错误代码-1021）
+            if (
+                "Timestamp for this request is outside of the recvWindow" in error_str
+                or "code=-1021" in error_str
+            ):
+                print("检测到时间戳错误，尝试重新同步时间并重试...")
+                try:
+                    # 重新同步时间
+                    self._sync_time()
+                    # 重试一次，使用更大的recvWindow
+                    account_info = self.client.futures_account(recvWindow=15000)
+                    if account_info:
+                        total_balance = float(account_info.get("totalMarginBalance", 0))
+                        print("时间重新同步成功，重试获取总资金")
+                        return total_balance
+                except Exception as retry_e:
+                    print(f"重试失败: {retry_e}")
+            
             return None
 
     def get_wallet_balance(self):
@@ -563,7 +591,27 @@ class BinanceAPI:
                 return wallet_balance
             return None
         except Exception as e:
-            print(f"获取钱包余额错误: {e}")
+            error_str = str(e)
+            print(f"获取钱包余额错误: {error_str}")
+            
+            # 检查是否是时间戳错误（错误代码-1021）
+            if (
+                "Timestamp for this request is outside of the recvWindow" in error_str
+                or "code=-1021" in error_str
+            ):
+                print("检测到时间戳错误，尝试重新同步时间并重试...")
+                try:
+                    # 重新同步时间
+                    self._sync_time()
+                    # 重试一次，使用更大的recvWindow
+                    account_info = self.client.futures_account(recvWindow=15000)
+                    if account_info:
+                        wallet_balance = float(account_info.get("totalWalletBalance", 0))
+                        print("时间重新同步成功，重试获取钱包余额")
+                        return wallet_balance
+                except Exception as retry_e:
+                    print(f"重试失败: {retry_e}")
+            
             return None
 
     def get_position(self, symbol):

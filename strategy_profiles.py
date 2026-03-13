@@ -14,8 +14,17 @@ class StrategyProfiles:
     TREND_BURST = {
         "name": "Kronos_趋势爆发_5min",
         "description": "捕捉Kronos预测的高强度趋势，顺势追单",
+        "coordinator": {
+            "min_signal_strength": 0.0045,
+            "max_position_size": 0.1,
+            "sentiment_weight": 0.3,
+            "technical_weight": 0.7,
+            "black_swan_threshold": "HIGH",
+            "enable_adaptive_filtering": True
+        },
         "basic": {
-            "LEVERAGE": 10,
+            "LEVERAGE": 15,
+            "POSITION_MULTIPLIER": 1.5,
             "TREND_STRENGTH_THRESHOLD": 0.010,
             "LOOKBACK_PERIOD": 128,
             "PREDICTION_LENGTH": 36,
@@ -57,7 +66,7 @@ class StrategyProfiles:
             "max_daily_position": 0.9
         },
         "frequency": {
-            "max_daily_trades": 15,
+            "max_daily_trades": 10,
             "min_trade_interval_minutes": 30,
             "active_hours_start": 0,
             "active_hours_end": 24
@@ -74,15 +83,25 @@ class StrategyProfiles:
             "reverse_confirm_count": 3,
             "require_consecutive_prediction": 3,
             "post_entry_hours": 12.0,
-            "take_profit_min_pct": 0.8
+            "take_profit_min_pct": 0.8,
+            "force_stop_loss_pct": -3.5
         }
     }
 
     RANGE_ARBITRAGE = {
         "name": "Kronos_震荡套利_5min",
         "description": "依托Kronos预测的高低点，在区间上沿空、下沿多",
+        "coordinator": {
+            "min_signal_strength": 0.0025,
+            "max_position_size": 0.12,
+            "sentiment_weight": 0.4,
+            "technical_weight": 0.6,
+            "black_swan_threshold": "MEDIUM",
+            "enable_adaptive_filtering": True
+        },
         "basic": {
-            "LEVERAGE": 10,
+            "LEVERAGE": 12,
+            "POSITION_MULTIPLIER": 1.1,
             "TREND_STRENGTH_THRESHOLD": 0.0025,
             "LOOKBACK_PERIOD": 64,
             "PREDICTION_LENGTH": 12,
@@ -141,15 +160,25 @@ class StrategyProfiles:
             "reverse_confirm_count": 1,
             "require_consecutive_prediction": 2,
             "post_entry_hours": 4.0,
-            "take_profit_min_pct": 0.25
+            "take_profit_min_pct": 0.25,
+            "force_stop_loss_pct": -1.5
         }
     }
 
     NEWS_BREAKOUT = {
         "name": "Kronos_消息突破_5min",
         "description": "配合FinGPT舆情，等待消息确认第一波真实突破方向后跟随入场",
+        "coordinator": {
+            "min_signal_strength": 0.0035,
+            "max_position_size": 0.1,
+            "sentiment_weight": 0.5,
+            "technical_weight": 0.5,
+            "black_swan_threshold": "MEDIUM",
+            "enable_adaptive_filtering": True
+        },
         "basic": {
-            "LEVERAGE": 10,
+            "LEVERAGE": 18,
+            "POSITION_MULTIPLIER": 1.3,
             "TREND_STRENGTH_THRESHOLD": 0.015,
             "LOOKBACK_PERIOD": 80,
             "PREDICTION_LENGTH": 18,
@@ -173,10 +202,10 @@ class StrategyProfiles:
             "short_buffer": 1.018
         },
         "take_profit": {
-            "tp1_multiplier_long": 1.02,
+            "tp1_multiplier_long": 1.03,
             "tp2_multiplier_long": 1.045,
             "tp3_multiplier_long": 1.09,
-            "tp1_multiplier_short": 0.98,
+            "tp1_multiplier_short": 0.97,
             "tp2_multiplier_short": 0.955,
             "tp3_multiplier_short": 0.91,
             "tp1_position_ratio": 0.4,
@@ -191,8 +220,8 @@ class StrategyProfiles:
             "max_daily_position": 0.88
         },
         "frequency": {
-            "max_daily_trades": 8,
-            "min_trade_interval_minutes": 45,
+            "max_daily_trades": 25,
+            "min_trade_interval_minutes": 5,
             "active_hours_start": 0,
             "active_hours_end": 24
         },
@@ -207,16 +236,26 @@ class StrategyProfiles:
             "entry_confirm_count": 2,
             "reverse_confirm_count": 2,
             "require_consecutive_prediction": 2,
-            "post_entry_hours": 5.0,
-            "take_profit_min_pct": 0.4
+            "post_entry_hours": 8.0,
+            "take_profit_min_pct": 0.5,
+            "force_stop_loss_pct": -3.0
         }
     }
 
     AUTO_STRATEGY = {
         "name": "Kronos_自动策略_5min",
         "description": "自动判断市场状态，动态切换趋势/震荡策略",
+        "coordinator": {
+            "min_signal_strength": 0.0030,
+            "max_position_size": 0.1,
+            "sentiment_weight": 0.3,
+            "technical_weight": 0.7,
+            "black_swan_threshold": "MEDIUM",
+            "enable_adaptive_filtering": True
+        },
         "basic": {
             "LEVERAGE": 10,
+            "POSITION_MULTIPLIER": 1.3,
             "TREND_STRENGTH_THRESHOLD": 0.0047,
             "LOOKBACK_PERIOD": 96,
             "PREDICTION_LENGTH": 24,
@@ -273,15 +312,25 @@ class StrategyProfiles:
             "reverse_confirm_count": 2,
             "require_consecutive_prediction": 2,
             "post_entry_hours": 6.0,
-            "take_profit_min_pct": 0.5
+            "take_profit_min_pct": 0.5,
+            "force_stop_loss_pct": -2.5
         }
     }
 
     TIME_STRATEGY = {
         "name": "Kronos_时间策略_5min",
         "description": "根据BTC交易活跃性时段特点，亚洲盘震荡策略，欧美盘趋势策略",
+        "coordinator": {
+            "min_signal_strength": 0.0030,
+            "max_position_size": 0.1,
+            "sentiment_weight": 0.3,
+            "technical_weight": 0.7,
+            "black_swan_threshold": "MEDIUM",
+            "enable_adaptive_filtering": True
+        },
         "basic": {
             "LEVERAGE": 10,
+            "POSITION_MULTIPLIER": 1.3,
             "TREND_STRENGTH_THRESHOLD": 0.006,
             "LOOKBACK_PERIOD": 96,
             "PREDICTION_LENGTH": 24,
@@ -338,7 +387,8 @@ class StrategyProfiles:
             "reverse_confirm_count": 2,
             "require_consecutive_prediction": 2,
             "post_entry_hours": 8.0,
-            "take_profit_min_pct": 0.6
+            "take_profit_min_pct": 0.6,
+            "force_stop_loss_pct": -3.0
         },
         "time_slots": {
             "asia": {

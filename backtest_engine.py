@@ -24,7 +24,7 @@ except ImportError as e:
 class MockBinanceAPI:
     """模拟币安API，用于回测"""
     
-    def __init__(self, historical_data, initial_capital=10000.0):
+    def __init__(self, historical_data, initial_capital=10000.0, commission_rate=0.001):
         self.historical_data = historical_data
         self.current_index = 0
         self.initial_capital = initial_capital
@@ -34,6 +34,7 @@ class MockBinanceAPI:
         self.orders = []
         self.trade_history = []
         self.equity_curve = []
+        self.commission_rate = commission_rate  # 手续费率
         
     def get_recent_klines(self, symbol, timeframe, lookback=100):
         """获取历史K线数据"""
@@ -59,6 +60,43 @@ class MockBinanceAPI:
             return "SHORT", abs(self.position)
         return None, 0.0
     
+    def get_position(self, symbol):
+        """获取当前持仓（兼容旧接口）"""
+        direction, size = self.get_current_position_info(symbol)
+        return {
+            'positionAmt': size if direction else 0,
+            'positionSide': direction or 'BOTH'
+        }
+    
+    def get_total_balance(self):
+        """获取总余额（可用+持仓）"""
+        return self.calculate_current_equity()
+    
+    def get_symbol_info(self, symbol):
+        """获取交易对信息"""
+        return {
+            'filters': [
+                {
+                    'filterType': 'LOT_SIZE',
+                    'stepSize': '0.001',
+                    'minQty': '0.001',
+                    'maxQty': '1000'
+                },
+                {
+                    'filterType': 'PRICE_FILTER',
+                    'tickSize': '0.01'
+                },
+                {
+                    'filterType': 'MIN_NOTIONAL',
+                    'minNotional': '100'
+                }
+            ]
+        }
+    
+    def set_leverage(self, symbol, leverage):
+        """设置杠杆（回测中不需要实际操作）"""
+        pass
+    
     def place_market_buy(self, symbol, quantity):
         """模拟市价买入（平空或开多）"""
         if self.current_index >= len(self.historical_data):
@@ -72,35 +110,53 @@ class MockBinanceAPI:
         
         # 如果有空仓，先平空
         if self.position < 0:
-            close_size = abs(self.position)
+            close_size = min(quantity, abs(self.position))
             close_value = close_size * execute_price
             
-            # 计算盈亏
+            # 计算盈亏（空仓盈亏：入场价 - 现价）
             pnl = (self.entry_price - execute_price) * close_size
             
-            # 更新资金
-            self.available_balance += close_value + pnl
-            self.position = 0.0
+            # 计算平仓手续费
+            close_commission = close_value * self.commission_rate
+            
+            # 更新资金（扣除手续费）
+            self.available_balance += close_value + pnl - close_commission
+            self.position += close_size  # 空仓是负数，加close_size（正数）减少空仓
+            
+            # 如果全部平仓，重置入场价
+            if self.position == 0:
+                self.entry_price = 0.0
             
             # 记录交易
-            self._record_trade("CLOSE_SHORT", execute_price, close_size, pnl)
+            self._record_trade("CLOSE_SHORT", execute_price, close_size, pnl, close_commission)
+            
+            # 如果只平空不开多，直接返回
+            if quantity <= close_size:
+                return True
+            
+            # 剩余数量用于开多
+            quantity = quantity - close_size
         
         # 开多仓
         if quantity > 0:
             position_value = quantity * execute_price
             
-            # 检查资金是否足够
-            if position_value > self.available_balance:
-                print(f"资金不足: 需要${position_value:.2f}, 可用${self.available_balance:.2f}")
+            # 计算开仓手续费
+            open_commission = position_value * self.commission_rate
+            
+            # 检查资金是否足够（包括手续费）
+            total_cost = position_value + open_commission
+            if total_cost > self.available_balance:
+                print(f"资金不足: 需要${total_cost:.2f}, 可用${self.available_balance:.2f}")
                 return False
             
-            # 更新状态
+            # 更新状态（扣除手续费）
             self.position = quantity
             self.entry_price = execute_price
-            self.available_balance -= position_value
+            self.available_balance -= total_cost
             
             # 记录交易
-            self._record_trade("OPEN_LONG", execute_price, quantity, 0.0)
+            self._record_trade("OPEN_LONG", execute_price, quantity, 0.0, open_commission)
         
         return True
     
@@ -123,8 +179,11 @@ class MockBinanceAPI:
             # 计算盈亏
             pnl = (execute_price - self.entry_price) * close_size
             
-            # 更新资金
-            self.available_balance += close_value + pnl
+            # 计算平仓手续费
+            close_commission = close_value * self.commission_rate
+            
+            # 更新资金（扣除手续费）
+            self.available_balance += close_value + pnl - close_commission
             self.position -= close_size
             
             # 如果全部平仓，重置入场价
@@ -132,11 +191,36 @@ class MockBinanceAPI:
                 self.entry_price = 0.0
             
             # 记录交易
-            self._record_trade("CLOSE_LONG", execute_price, close_size, pnl)
+            self._record_trade("CLOSE_LONG", execute_price, close_size, pnl, close_commission)
             
-            return True
+            # 如果只平多不开空，直接返回
+            if quantity <= close_size:
+                return True
+            
+            # 剩余数量用于开空
+            quantity = quantity - close_size
         
-        # 开空仓（简化处理，回测中不实际开空）
+        # 开空仓
+        if quantity > 0:
+            position_value = quantity * execute_price
+            
+            # 计算开仓手续费
+            open_commission = position_value * self.commission_rate
+            
+            # 检查资金是否足够（包括手续费）
+            total_cost = position_value + open_commission
+            if total_cost > self.available_balance:
+                print(f"资金不足: 需要${total_cost:.2f}, 可用${self.available_balance:.2f}")
+                return False
+            
+            # 更新状态（空仓用负数表示，扣除手续费）
+            self.position = -quantity
+            self.entry_price = execute_price
+            self.available_balance -= total_cost
+            
+            # 记录交易
+            self._record_trade("OPEN_SHORT", execute_price, quantity, 0.0, open_commission)
+        
         return True
     
     def place_stop_loss_order(self, symbol, side, quantity, stop_price):
@@ -168,7 +252,7 @@ class MockBinanceAPI:
         """取消所有算法订单"""
         return True
     
-    def _record_trade(self, trade_type, price, quantity, pnl):
+    def _record_trade(self, trade_type, price, quantity, pnl, commission=0.0):
         """记录交易"""
         timestamp = self.historical_data['timestamps'].iloc[self.current_index] if self.current_index < len(self.historical_data) else datetime.now()
         self.trade_history.append({
@@ -177,6 +261,7 @@ class MockBinanceAPI:
             'price': price,
             'quantity': quantity,
             'pnl': pnl,
+            'commission': commission,
             'available_balance': self.available_balance,
             'position': self.position
         })
@@ -194,9 +279,12 @@ class MockBinanceAPI:
         position_value = 0.0
         
         if self.position > 0:
+            # 多仓：当前价值 = 数量 × 现价
             position_value = self.position * current_price
         elif self.position < 0:
-            position_value = abs(self.position) * (self.entry_price - current_price) + abs(self.position) * self.entry_price
+            # 空仓：当前价值 = 数量 × 入场价 + (入场价 - 现价) × 数量
+            # 也就是：入场价值 + 浮盈
+            position_value = abs(self.position) * self.entry_price + (self.entry_price - current_price) * abs(self.position)
         
         return self.available_balance + position_value
     
@@ -473,10 +561,11 @@ class BacktestEngine:
         print(f"结束时间: {data['timestamps'].iloc[-1]}")
         
         # 初始化模拟币安API
-        self.mock_binance = MockBinanceAPI(data, self.initial_capital)
-        
-        # 获取策略配置
-        profile = StrategyProfiles.get_profile(self.strategy_profile)
+        self.mock_binance = MockBinanceAPI(
+            data, 
+            self.initial_capital,
+            commission_rate=self.commission_rate
+        )
         
         # 创建策略实例（注入模拟币安API）
         self.strategy = ProfessionalTradingStrategy(
@@ -486,10 +575,6 @@ class BacktestEngine:
             binance=self.mock_binance,
             backtest_mode=True
         )
-        
-        # 应用策略配置
-        self.strategy.strategy_profile = profile
-        self.strategy._load_strategy_config()
         
         # 回测主循环
         total_candles = len(data)

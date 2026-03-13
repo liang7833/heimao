@@ -1,5 +1,37 @@
 #!/usr/bin/env python
-"""FinGPT舆情分析模块 - 加密货币新闻、社交媒体情绪分析和黑天鹅事件检测"""
+"""FinGPT舆情分析模块 - 加密货币新闻、社交媒体情绪分析和黑天鹅事件检测
+
+================================================================================
+FinGPT官方推荐配置参考（根据 https://github.com/AI4Finance-Foundation/FinGPT）
+================================================================================
+
+1. 官方推荐的情绪分析模型：
+   - 模型名称: FinGPT/fingpt-sentiment_llama2-13b_lora
+   - 基础模型: NousResearch/Llama-2-13b-hf
+   - 训练方法: Instruction Fine-tuning + LoRA
+   - 任务: Sentiment Analysis（三分类：negative/neutral/positive）
+
+2. 官方推荐的推理模板：
+   Instruction: What is the sentiment of this news? Please choose an answer from {negative/neutral/positive}
+   Input: [新闻内容]
+   Answer: 
+
+3. 官方推荐的依赖库：
+   - transformers==4.32.0
+   - peft==0.5.0
+   - sentencepiece
+   - accelerate
+   - torch
+   - datasets
+   - bitsandbytes
+
+4. 注意事项：
+   - Llama2-13b模型需要大量显存（建议至少16GB VRAM）
+   - 当前实现使用轻量级模型以保证兼容性
+   - 如需使用官方完整模型，请修改use_lora=True并配置相应资源
+
+================================================================================
+"""
 
 import os
 import sys
@@ -78,18 +110,20 @@ import warnings
 warnings.filterwarnings("ignore")
 
 try:
-    from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+    from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM, LlamaTokenizerFast
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
     print("警告: transformers库未安装，部分功能受限")
 
 try:
-    from qwen_news_processor import QwenNewsProcessor, get_qwen_news_processor
-    QWEN_PROCESSOR_AVAILABLE = True
-except ImportError as e:
-    QWEN_PROCESSOR_AVAILABLE = False
-    print(f"警告: Qwen新闻处理器不可用: {e}")
+    from peft import PeftModel
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+    print("警告: peft库未安装，LoRA模型功能受限")
+
+
 
 try:
     from social_sentiment_crawler import SocialSentimentCrawler, get_social_sentiment_crawler
@@ -103,19 +137,27 @@ class FinGPTSentimentAnalyzer:
     
     def __init__(self, 
                  use_local_model: bool = True,
-                 model_name: str = "FinGPT/fingpt-forecaster",
-                 use_qwen_preprocessing: bool = True):
+                 model_name: str = "FinGPT/fingpt-sentiment_llama2-13b_lora",
+                 base_model: str = "NousResearch/Llama-2-13b-hf",
+                 use_lora: bool = True):
         """
-        初始化FinGPT分析器
+        初始化FinGPT分析器（参考官方推荐配置）
         
         Args:
             use_local_model: 是否使用本地模型
-            model_name: 本地模型名称
-            use_qwen_preprocessing: 是否使用Qwen新闻预处理
+            model_name: FinGPT情绪分析模型名称（官方推荐: FinGPT/fingpt-sentiment_llama2-13b_lora）
+            base_model: 基础模型名称（官方推荐: NousResearch/Llama-2-13b-hf）
+            use_lora: 是否使用LoRA格式（官方推荐）
         """
         self.use_local_model = use_local_model
         self.model_name = model_name
-        self.use_qwen_preprocessing = use_qwen_preprocessing
+        self.base_model = base_model
+        self.use_lora = use_lora
+        
+        # FinGPT官方推荐的Instruction模板
+        self.instruction_template = '''Instruction: What is the sentiment of this news? Please choose an answer from {negative/neutral/positive}
+Input: {text}
+Answer: '''
         
         # 兼容 PyInstaller 打包环境
         if getattr(sys, 'frozen', False):
@@ -131,17 +173,6 @@ class FinGPTSentimentAnalyzer:
         self.sentiment_model = None
         self.tokenizer = None
         self.sentiment_pipeline = None
-        
-        # Qwen新闻处理器
-        self.qwen_processor = None
-        if use_qwen_preprocessing and QWEN_PROCESSOR_AVAILABLE:
-            try:
-                print("正在初始化Qwen新闻处理器...")
-                self.qwen_processor = get_qwen_news_processor()
-                print("  ✓ Qwen新闻处理器初始化完成")
-            except Exception as e:
-                print(f"  ⚠️ Qwen新闻处理器初始化失败: {e}")
-                self.qwen_processor = None
         
         # 社交媒体情绪爬虫
         self.social_sentiment_crawler = None
@@ -185,16 +216,15 @@ class FinGPTSentimentAnalyzer:
         self.cache = {}
         self.cache_ttl = 300  # 5分钟缓存
         
-        print(f"FinGPT舆情分析器初始化完成 (本地模型: {use_local_model}, Qwen预处理: {use_qwen_preprocessing})")
+        print(f"FinGPT舆情分析器初始化完成 (本地模型: {use_local_model})")
     
     def _initialize_models(self):
-        """初始化情绪分析模型"""
+        """初始化情绪分析模型（参考FinGPT官方实现）"""
         if self.use_local_model and TRANSFORMERS_AVAILABLE:
             try:
                 print("正在加载本地FinGPT情绪分析模型...")
-                # 使用较小的模型以节省资源
-                # 使用项目目录下的模型
-                # 重新定义 base_dir
+                
+                # 确定模型路径
                 if getattr(sys, 'frozen', False):
                     base_dir = os.path.dirname(sys.executable)
                 else:
@@ -207,7 +237,8 @@ class FinGPTSentimentAnalyzer:
                 
                 # 检查模型文件是否存在
                 if not os.path.exists(model_path):
-                    print("  ⚠️ 本地模型目录不存在，将使用基于规则的情绪分析")
+                    print(f"  ⚠️ 本地模型目录不存在: {model_path}")
+                    print("  ⚠️ 将使用基于规则的情绪分析")
                     self.use_local_model = False
                 else:
                     # 检查必要的模型文件
@@ -215,17 +246,32 @@ class FinGPTSentimentAnalyzer:
                     model_files_exist = all(os.path.exists(os.path.join(model_path, f)) for f in required_files)
                     
                     if not model_files_exist:
-                        print("  ⚠️ 本地模型文件不完整，将使用基于规则的情绪分析")
+                        print("  ⚠️ 本地模型文件不完整")
+                        print("  ⚠️ 将使用基于规则的情绪分析")
                         self.use_local_model = False
                     else:
                         try:
-                            # 首先尝试仅本地加载
-                            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-                            self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_path, local_files_only=True)
+                            import torch
+                            
+                            # 加载tokenizer
+                            print("  正在加载tokenizer...")
+                            self.tokenizer = AutoTokenizer.from_pretrained(
+                                model_path, 
+                                local_files_only=True,
+                                truncation_side="right",
+                                padding_side="right"
+                            )
+                            
+                            # 加载模型
+                            print("  正在加载模型...")
+                            self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(
+                                model_path, 
+                                local_files_only=True
+                            )
+                            
                             print("  ✓ 从本地缓存加载模型成功")
                             
-                            # 移到GPU（如果可用）
-                            import torch
+                            # 确定设备
                             self.device = "cuda" if torch.cuda.is_available() else "cpu"
                             if self.device == "cuda":
                                 self.sentiment_model = self.sentiment_model.to(self.device)
@@ -233,20 +279,32 @@ class FinGPTSentimentAnalyzer:
                             else:
                                 print("  使用CPU运行")
                             
+                            # 设置模型为评估模式
+                            self.sentiment_model.eval()
+                            
+                            # 创建pipeline
                             self.sentiment_pipeline = pipeline(
                                 "sentiment-analysis", 
                                 model=self.sentiment_model, 
                                 tokenizer=self.tokenizer,
-                                device=0 if self.device == "cuda" else -1
+                                device=0 if self.device == "cuda" else -1,
+                                return_all_scores=True,
+                                truncation=True,
+                                max_length=512
                             )
-                            print("✓ 本地情绪分析模型加载完成")
+                            print("✓ 本地FinGPT情绪分析模型加载完成")
+                            
                         except Exception as local_e:
                             print(f"  ⚠️ 本地模型加载失败: {local_e}")
+                            import traceback
+                            traceback.print_exc()
                             print("  ⚠️ 将使用基于规则的情绪分析")
                             self.use_local_model = False
                 
             except Exception as e:
                 print(f"初始化模型时出错: {e}")
+                import traceback
+                traceback.print_exc()
                 print("将使用基于规则的情绪分析")
                 self.use_local_model = False
         
@@ -281,14 +339,14 @@ class FinGPTSentimentAnalyzer:
             return {}
     
     def fetch_crypto_news(self, symbol="BTC", limit=20):
-        """获取加密货币新闻数据（使用新闻爬虫缓存 + Qwen预处理）
+        """获取加密货币新闻数据（使用新闻爬虫缓存）
         
         Args:
             symbol: 加密货币符号 (BTC, ETH等)
             limit: 最大新闻数量
             
         Returns:
-            新闻数据列表（英文，已预处理）
+            新闻数据列表（英文）
         """
         news_data = []
         
@@ -312,15 +370,7 @@ class FinGPTSentimentAnalyzer:
             ]
             news_data = sample_news
         
-        # 使用Qwen预处理新闻
-        if self.use_qwen_preprocessing and self.qwen_processor:
-            print(f"  [Qwen预处理] 正在处理新闻...")
-            processed_news = self.qwen_processor.process_news_batch(news_data)
-            if processed_news:
-                print(f"  [Qwen预处理] 完成，保留{len(processed_news)}条新闻")
-                return processed_news
-        
-        # 如果Qwen不可用或未启用，返回原始新闻
+        # 返回原始新闻
         return news_data
     
     def fetch_social_sentiment(self, symbol="BTC"):
@@ -385,7 +435,7 @@ class FinGPTSentimentAnalyzer:
         return social_data
     
     def analyze_sentiment(self, text: str) -> Dict:
-        """分析文本情绪
+        """分析文本情绪（参考FinGPT官方实现）
         
         Args:
             text: 待分析文本
@@ -394,35 +444,107 @@ class FinGPTSentimentAnalyzer:
             情绪分析结果
         """
         if not text or len(text.strip()) < 10:
-            return {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
+            return {
+                "sentiment": "neutral", 
+                "score": 0.0, 
+                "confidence": 0.0,
+                "all_scores": {"negative": 0.0, "neutral": 1.0, "positive": 0.0}
+            }
         
         # 使用本地模型分析
         if self.use_local_model and self.sentiment_pipeline:
             try:
-                result = self.sentiment_pipeline(text[:512])  # 限制文本长度
-                sentiment = result[0]['label'].lower()
-                score = result[0]['score']
+                # 使用pipeline分析
+                results = self.sentiment_pipeline(text[:512])  # 限制文本长度
+                
+                # 处理不同的返回格式
+                all_scores = {}
+                sentiment = "neutral"
+                confidence = 0.0
+                
+                # 尝试多种可能的格式
+                if isinstance(results, list) and len(results) > 0:
+                    # 格式1: [{'label': 'positive', 'score': 0.8}]
+                    if isinstance(results[0], dict) and 'label' in results[0] and 'score' in results[0]:
+                        sentiment = results[0]['label'].lower()
+                        confidence = results[0]['score']
+                        all_scores = {sentiment: confidence}
+                    
+                    # 格式2: [[{'label': 'negative', 'score': 0.1}, {'label': 'neutral', 'score': 0.8}, ...]]
+                    elif isinstance(results[0], list) and len(results[0]) > 0:
+                        for score_item in results[0]:
+                            if isinstance(score_item, dict) and 'label' in score_item and 'score' in score_item:
+                                label = score_item['label'].lower()
+                                all_scores[label] = score_item['score']
+                        
+                        if all_scores:
+                            sentiment = max(all_scores.items(), key=lambda x: x[1])[0]
+                            confidence = all_scores[sentiment]
+                    
+                    # 格式3: {'label': 'positive', 'score': 0.8} (不是列表)
+                    elif isinstance(results, dict) and 'label' in results and 'score' in results:
+                        sentiment = results['label'].lower()
+                        confidence = results['score']
+                        all_scores = {sentiment: confidence}
+                
+                # 确保我们有有效的分数
+                if not all_scores:
+                    print(f"  ⚠️ 无法解析pipeline结果，使用规则分析")
+                    return self._rule_based_sentiment(text)
                 
                 # 转换为统一的情绪分数 (-1到1)
-                if sentiment in ["positive", "bullish"]:
-                    sentiment_score = score
-                elif sentiment in ["negative", "bearish"]:
-                    sentiment_score = -score
-                else:
+                if sentiment in ["positive", "bullish", "2"]:
+                    sentiment_score = confidence
+                elif sentiment in ["negative", "bearish", "0"]:
+                    sentiment_score = -confidence
+                else:  # neutral or "1"
                     sentiment_score = 0.0
                 
+                # 标准化标签
+                if sentiment in ["0", "negative"]:
+                    normalized_sentiment = "negative"
+                elif sentiment in ["2", "positive"]:
+                    normalized_sentiment = "positive"
+                else:
+                    normalized_sentiment = "neutral"
+                
                 return {
-                    "sentiment": sentiment,
+                    "sentiment": normalized_sentiment,
                     "score": sentiment_score,
-                    "confidence": score,
+                    "confidence": confidence,
+                    "all_scores": all_scores,
                     "method": "FinGPT模型"
                 }
             except Exception as e:
                 print(f"模型情绪分析失败: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"  ⚠️ 回退到基于规则的情绪分析")
                 # 回退到基于规则的分析
         
         # 基于规则的情绪分析（备用）
         return self._rule_based_sentiment(text)
+    
+    def analyze_batch_sentiment(self, texts: List[str]) -> List[Dict]:
+        """批量分析文本情绪（提高效率，参考FinGPT官方实现）
+        
+        Args:
+            texts: 待分析文本列表
+            
+        Returns:
+            情绪分析结果列表
+        """
+        if not texts:
+            return []
+        
+        # 直接使用逐个分析，更稳定可靠
+        results = []
+        for i, text in enumerate(texts):
+            result = self.analyze_sentiment(text)
+            result['text_index'] = i
+            results.append(result)
+        
+        return results
     
     def _rule_based_sentiment(self, text: str) -> Dict:
         """基于规则的情绪分析（备用方法）"""
@@ -450,8 +572,14 @@ class FinGPTSentimentAnalyzer:
         total = pos_count + neg_count
         if total > 0:
             sentiment_score = (pos_count - neg_count) / total
+            pos_score = pos_count / total
+            neg_score = neg_count / total
+            neu_score = 1.0 - pos_score - neg_score
         else:
             sentiment_score = 0.0
+            pos_score = 0.0
+            neg_score = 0.0
+            neu_score = 1.0
         
         # 确定情绪标签
         if sentiment_score > 0.3:
@@ -461,15 +589,23 @@ class FinGPTSentimentAnalyzer:
         else:
             sentiment = "neutral"
         
+        # 计算置信度
+        confidence = max(pos_score, neg_score, neu_score)
+        
         return {
             "sentiment": sentiment,
             "score": sentiment_score,
-            "confidence": min(abs(sentiment_score) * 2, 1.0),  # 置信度估计
+            "confidence": confidence,
+            "all_scores": {
+                "negative": neg_score,
+                "neutral": neu_score,
+                "positive": pos_score
+            },
             "method": "基于规则"
         }
     
     def detect_black_swan_events(self, news_data: List[Dict]) -> Dict:
-        """检测黑天鹅事件 - 使用Qwen预处理结果，确保一致性
+        """检测黑天鹅事件 - 基于关键词匹配
         
         Args:
             news_data: 新闻数据列表
@@ -481,14 +617,6 @@ class FinGPTSentimentAnalyzer:
         critical_events = []
         risk_level = "LOW"
         event_types = set()
-        
-        # Qwen严重程度到FinGPT严重程度的映射
-        severity_map = {
-            "SEVERE": "critical",
-            "MODERATE": "warning",
-            "MILD": None,
-            "IRRELEVANT": None
-        }
         
         # 关键词到事件类型的映射
         keyword_to_type = {
@@ -504,38 +632,36 @@ class FinGPTSentimentAnalyzer:
         }
         
         for news in news_data:
-            # 优先使用Qwen预处理的结果
-            qwen_analysis = news.get("qwen_analysis", {})
-            qwen_severity = qwen_analysis.get("severity", "MILD")
-            qwen_keywords = qwen_analysis.get("keywords", [])
-            qwen_has_negation = qwen_analysis.get("has_negation", False)
+            title = news.get("title", "").lower()
+            content = news.get("content", "").lower()
+            full_text = f"{title} {content}"
             
-            # 如果有否定词，即使Qwen标记为严重也跳过
-            if qwen_has_negation:
-                continue
-                
-            # 映射到FinGPT的严重程度
-            fin_gpt_severity = severity_map.get(qwen_severity)
-            
-            if fin_gpt_severity and qwen_keywords:
-                # 使用Qwen提供的关键词和严重程度
-                for keyword in qwen_keywords[:1]:  # 每个新闻只取第一个关键词
-                    event_type = keyword_to_type.get(keyword, "market")
-                    event_info = {
-                        "type": event_type,
-                        "keyword": keyword,
-                        "severity": fin_gpt_severity,
-                        "title": news.get("title", ""),
-                        "source": news.get("source", ""),
-                        "time": news.get("published_at", "")
-                    }
-                    events.append(event_info)
-                    
-                    if fin_gpt_severity == "critical":
-                        critical_events.append(event_info)
-                        
-                    event_types.add(event_type)
-                    break
+            # 检测critical级别的关键词
+            for severity, categories in self.black_swan_keywords.items():
+                for category, keywords in categories.items():
+                    for keyword in keywords:
+                        if keyword.lower() in full_text:
+                            # 验证敏感关键词
+                            if keyword in self.sensitive_keywords:
+                                valid_context = any(valid_phrase in full_text for valid_phrase in self.sensitive_keywords[keyword])
+                                if not valid_context:
+                                    continue
+                            
+                            event_type = keyword_to_type.get(keyword, category)
+                            event_info = {
+                                "type": event_type,
+                                "keyword": keyword,
+                                "severity": severity,
+                                "title": news.get("title", ""),
+                                "source": news.get("source", ""),
+                                "time": news.get("published_at", "")
+                            }
+                            events.append(event_info)
+                            
+                            if severity == "critical":
+                                critical_events.append(event_info)
+                                
+                            event_types.add(event_type)
         
         # 计算关键事件数量
         critical_count = len(critical_events)
@@ -593,11 +719,12 @@ class FinGPTSentimentAnalyzer:
         news_data = self.fetch_crypto_news(symbol)
         print(f"      ✓ 获取到 {len(news_data)} 条新闻")
         
-        # 分析每条新闻的情绪（如果新闻已包含情绪分析则直接使用）
+        # 分析每条新闻的情绪（如果新闻已包含有效情绪分析则直接使用）
         print(f"  [2/4] 正在分析新闻情绪...")
         news_sentiments = []
-        for news in news_data:
-            if "sentiment_score" in news:
+        for i, news in enumerate(news_data):
+            # 只有当情绪分数不是0.0时才使用缓存的结果
+            if "sentiment_score" in news and news["sentiment_score"] != 0.0:
                 # 使用新闻爬虫已分析好的情绪
                 sentiment_score = news["sentiment_score"]
                 sentiment = news.get("sentiment", "neutral")
@@ -726,8 +853,10 @@ class FinGPTSentimentAnalyzer:
         
         # 情绪一致性检查
         sentiment_consistent = True
-        # 获取信号强度（归一化值）
-        signal_strength = trading_signal.get('trend_strength', 0)
+        # 获取信号强度（归一化到0-1范围）
+        raw_signal_strength = trading_signal.get('trend_strength', 0)
+        # 归一化：0.002→0.2, 0.01→1.0
+        signal_strength = min(raw_signal_strength / 0.01, 1.0)
         
         if signal_direction == "LONG" and overall_sentiment == "BEARISH":
             sentiment_consistent = False

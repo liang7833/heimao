@@ -76,8 +76,7 @@ class StrategyCoordinator:
                 print("  加载FinGPT舆情分析器...")
                 try:
                     self.fingpt_analyzer = FinGPTSentimentAnalyzer(
-                        use_local_model=True,
-                        use_qwen_preprocessing=True
+                        use_local_model=True
                     )
                     self.fingpt_available = True
                     print("  ✓ FinGPT舆情分析器就绪")
@@ -89,7 +88,7 @@ class StrategyCoordinator:
         
         # 策略配置
         self.config = {
-            "min_signal_strength": 0.15,  # 最小信号强度（从0.3降低到0.15，与Alpha处理器对齐）
+            "min_signal_strength": 0.0025,  # 最小信号强度（与Kronos趋势强度范围匹配：0.002-0.01）
             "max_position_size": 0.1,    # 最大仓位比例
             "sentiment_weight": 0.3,     # 舆情权重
             "technical_weight": 0.7,     # 技术权重
@@ -97,18 +96,13 @@ class StrategyCoordinator:
             "enable_adaptive_filtering": True,  # 启用自适应过滤
         }
         
-        # Qwen 状态（从 FinGPT 间接判断）
-        self.qwen_available = False
-        if self.fingpt_available and self.fingpt_analyzer:
-            if hasattr(self.fingpt_analyzer, 'qwen_processor') and self.fingpt_analyzer.qwen_processor:
-                self.qwen_available = True
-        
         # 性能跟踪
         self.performance_stats = {
             "total_signals": 0,
             "filtered_signals": 0,
             "sentiment_filtered": 0,
             "risk_filtered": 0,
+            "strength_filtered": 0,
             "last_update": datetime.now().isoformat()
         }
         
@@ -176,6 +170,8 @@ class StrategyCoordinator:
             self.performance_stats["sentiment_filtered"] += 1
         if final_decision.get("filtered_by_risk", False):
             self.performance_stats["risk_filtered"] += 1
+        if final_decision.get("filtered_by_strength", False):
+            self.performance_stats["strength_filtered"] += 1
         self.performance_stats["last_update"] = datetime.now().isoformat()
         
         # 组合最终结果
@@ -185,7 +181,6 @@ class StrategyCoordinator:
             "analysis_summary": {
                 "kronos_available": self.kronos_available,
                 "fingpt_available": self.fingpt_available,
-                "qwen_available": self.qwen_available,
                 "signal_integrated": kronos_signal is not None or sentiment_analysis is not None
             },
             "kronos_signal": kronos_signal,
@@ -220,6 +215,7 @@ class StrategyCoordinator:
             "filter_reason": None,
             "filtered_by_sentiment": False,
             "filtered_by_risk": False,
+            "filtered_by_strength": False,
             "final_signal": None,
             "integration_method": "加权融合",
             "integration_timestamp": datetime.now().isoformat()
@@ -232,6 +228,20 @@ class StrategyCoordinator:
                 "filter_reason": "Kronos信号缺失",
                 "final_signal": None
             })
+            return integration_result
+        
+        # 检查信号强度是否满足最小要求
+        trend_strength = kronos_signal.get("trend_strength", 0.0)
+        min_strength = self.config.get("min_signal_strength", 0.0025)
+        if trend_strength < min_strength:
+            integration_result.update({
+                "signal_filtered": True,
+                "filter_reason": f"信号强度过低 ({trend_strength:.4f} < {min_strength:.4f})",
+                "filtered_by_strength": True,
+                "final_signal": None,
+                "integration_method": "信号强度过滤"
+            })
+            print(f"    ⚠️  信号被过滤: 信号强度过低 ({trend_strength:.4f} < {min_strength:.4f})")
             return integration_result
         
         # 复制Kronos信号作为基础，保留原始信号有效性
@@ -279,6 +289,21 @@ class StrategyCoordinator:
                 "final_signal": kronos_signal,
                 "integration_method": "FinGPT不可用，使用原始信号"
             })
+        
+        # 最后检查：融合后的信号强度是否仍满足要求
+        final_signal = integration_result.get("final_signal")
+        if final_signal:
+            final_strength = final_signal.get("trend_strength", 0.0)
+            min_strength = self.config.get("min_signal_strength", 0.0025)
+            if final_strength < min_strength:
+                integration_result.update({
+                    "signal_filtered": True,
+                    "filter_reason": f"融合后信号强度过低 ({final_strength:.4f} < {min_strength:.4f})",
+                    "filtered_by_strength": True,
+                    "final_signal": None,
+                    "integration_method": "融合后信号强度过滤"
+                })
+                print(f"    ⚠️  信号被过滤: 融合后信号强度过低 ({final_strength:.4f} < {min_strength:.4f})")
         
         return integration_result
     
@@ -394,19 +419,22 @@ class StrategyCoordinator:
         trend_strength = final_signal.get("trend_strength", 0.0)
         risk_level = final_signal.get("risk_level", "LOW")
         
+        # 趋势强度归一化：0.002→0.2, 0.01→1.0（提前计算，供后面使用）
+        normalized_strength = min(trend_strength / 0.01, 1.0)  # 归一化到0-1范围
+        
         # 确定交易动作（统一方向标识：LONG/BUY = 做多，SHORT/SELL = 做空）
         if trend_direction in ["LONG", "BUY"]:
             action = "BUY"
-            confidence = trend_strength
+            confidence = normalized_strength  # 用归一化后的值作为置信度
         elif trend_direction in ["SHORT", "SELL"]:
             action = "SELL"
-            confidence = trend_strength
+            confidence = normalized_strength  # 用归一化后的值作为置信度
         else:
             action = "HOLD"
             confidence = 0.0
         
-        # 计算仓位大小（基于信号强度和风险）
-        base_position = min(trend_strength, self.config["max_position_size"])
+        # 计算仓位大小（基于信号强度归一化后的值）
+        base_position = normalized_strength * self.config["max_position_size"]
         
         # 根据风险等级调整仓位
         risk_adjustment = {
@@ -438,10 +466,12 @@ class StrategyCoordinator:
         
         # 构建推理链条
         reasoning = []
-        if trend_strength > 0.5:
-            reasoning.append(f"强趋势信号 ({trend_strength:.2f})")
+        if normalized_strength > 0.5:
+            reasoning.append(f"强趋势信号 (归一化强度: {normalized_strength:.2f})")
+        elif normalized_strength > 0.2:
+            reasoning.append(f"中等趋势信号 (归一化强度: {normalized_strength:.2f})")
         else:
-            reasoning.append(f"中等趋势信号 ({trend_strength:.2f})")
+            reasoning.append(f"弱趋势信号 (归一化强度: {normalized_strength:.2f})")
         
         if risk_level == "LOW":
             reasoning.append("低风险环境")
@@ -577,6 +607,7 @@ class StrategyCoordinator:
             "filtered_signals": 0,
             "sentiment_filtered": 0,
             "risk_filtered": 0,
+            "strength_filtered": 0,
             "last_update": datetime.now().isoformat()
         }
         print("性能统计已重置")
