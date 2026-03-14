@@ -29,6 +29,21 @@ class SplashScreen:
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
         
+        # 设置启动画面图标（也用于任务栏）
+        try:
+            icon_path = os.path.join(base_dir, 'app_icon.ico')
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(icon_path)
+                # 设置Windows AppUserModelID
+                try:
+                    import ctypes
+                    myappid = 'kronos.trading.app'
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                except:
+                    pass
+        except:
+            pass
+        
         # 设置窗口大小600x600
         window_width = 600
         window_height = 600
@@ -82,7 +97,7 @@ class SplashScreen:
                    fg="#ffffff", font=("Arial", 150)).pack(pady=(100, 20))
         
         # 显示文字
-        text_label = tk.Label(main_frame, text="黑猫交易系统v2.0", 
+        text_label = tk.Label(main_frame, text="黑猫交易系统v2.2", 
                             bg="#1a1a1a", fg="#ffffff", 
                             font=("微软雅黑", 28, "bold"))
         text_label.pack()

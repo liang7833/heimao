@@ -81,7 +81,6 @@ class StrategyProfiles:
         "strategy": {
             "entry_confirm_count": 2,
             "reverse_confirm_count": 3,
-            "require_consecutive_prediction": 3,
             "post_entry_hours": 12.0,
             "take_profit_min_pct": 0.8,
             "force_stop_loss_pct": -3.5
@@ -158,7 +157,6 @@ class StrategyProfiles:
         "strategy": {
             "entry_confirm_count": 2,
             "reverse_confirm_count": 1,
-            "require_consecutive_prediction": 2,
             "post_entry_hours": 4.0,
             "take_profit_min_pct": 0.25,
             "force_stop_loss_pct": -1.5
@@ -186,7 +184,6 @@ class StrategyProfiles:
         },
         "ai_filter": {
             "min_trend_strength": 0.015,
-            "require_consecutive_prediction": 2,
             "min_price_deviation": 0.01,
             "require_fingpt_signal": True,
         },
@@ -235,7 +232,6 @@ class StrategyProfiles:
         "strategy": {
             "entry_confirm_count": 2,
             "reverse_confirm_count": 2,
-            "require_consecutive_prediction": 2,
             "post_entry_hours": 8.0,
             "take_profit_min_pct": 0.5,
             "force_stop_loss_pct": -3.0
@@ -310,7 +306,6 @@ class StrategyProfiles:
         "strategy": {
             "entry_confirm_count": 3,
             "reverse_confirm_count": 2,
-            "require_consecutive_prediction": 2,
             "post_entry_hours": 6.0,
             "take_profit_min_pct": 0.5,
             "force_stop_loss_pct": -2.5
@@ -385,7 +380,6 @@ class StrategyProfiles:
         "strategy": {
             "entry_confirm_count": 2,
             "reverse_confirm_count": 2,
-            "require_consecutive_prediction": 2,
             "post_entry_hours": 8.0,
             "take_profit_min_pct": 0.6,
             "force_stop_loss_pct": -3.0

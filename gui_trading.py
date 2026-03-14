@@ -425,7 +425,6 @@ class StrategyConfigDialog:
             "strategy": {
                 "entry_confirm_count": 3,
                 "reverse_confirm_count": 2,
-                "require_consecutive_prediction": 2,
                 "post_entry_hours": 6,
                 "take_profit_min_pct": 0.5,
                 "force_stop_loss_pct": -2.5
@@ -544,7 +543,6 @@ class StrategyConfigDialog:
         self._create_param_row(frame, "basic", "POSITION_MULTIPLIER", "仓位倍数", "float", 0.1, 10.0, "基于风险计算的仓位调整倍数")
         self._create_param_row(frame, "basic", "LOOKBACK_PERIOD", "回看K线数量", "int", 64, 2048, "技术分析使用的历史数据长度")
         self._create_param_row(frame, "basic", "PREDICTION_LENGTH", "预测K线数量", "int", 4, 200, "Kronos预测的未来K线数量")
-        self._create_param_row(frame, "basic", "CHECK_INTERVAL", "检查间隔(秒)", "int", 30, 3600, "系统检查交易信号的间隔")
     
     def _create_entry_tab(self):
         """创建入场过滤参数标签页"""
@@ -633,7 +631,6 @@ class StrategyConfigDialog:
         
         self._create_param_row(frame, "strategy", "entry_confirm_count", "入场确认次数", "int", 1, 10, "需要连续多少次确认才入场")
         self._create_param_row(frame, "strategy", "reverse_confirm_count", "反转确认次数", "int", 1, 10, "需要连续多少次确认才反转")
-        self._create_param_row(frame, "strategy", "require_consecutive_prediction", "连续预测要求", "int", 1, 10, "需要连续多少次预测一致才交易")
         self._create_param_row(frame, "strategy", "post_entry_hours", "入场后等待小时", "float", 0.1, 72.0, "入场后多少小时内不反向开仓")
         self._create_param_row(frame, "strategy", "take_profit_min_pct", "最小止盈百分比", "float", 0.1, 5.0, "至少盈利多少百分比才触发止盈")
         self._create_param_row(frame, "strategy", "force_stop_loss_pct", "强制止损百分比", "float", -10.0, -0.1, "亏损达到此百分比时强制平仓")
@@ -764,7 +761,6 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 1,
-                    "require_consecutive_prediction": 1,
                     "post_entry_hours": 2.0,
                     "take_profit_min_pct": 0.3,
                     "force_stop_loss_pct": -2.0
@@ -831,7 +827,6 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 3,
-                    "require_consecutive_prediction": 3,
                     "post_entry_hours": 12.0,
                     "take_profit_min_pct": 0.8,
                     "force_stop_loss_pct": -3.5
@@ -898,8 +893,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 2,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 6.0,
+                        "post_entry_hours": 6.0,
                     "take_profit_min_pct": 0.5,
                     "force_stop_loss_pct": -2.5
                 }
@@ -965,8 +959,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 1,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 4.0,
+                        "post_entry_hours": 4.0,
                     "take_profit_min_pct": 0.25,
                     "force_stop_loss_pct": -1.5
                 }
@@ -1032,7 +1025,6 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 4,
-                    "require_consecutive_prediction": 4,
                     "post_entry_hours": 24.0,
                     "take_profit_min_pct": 1.2,
                     "force_stop_loss_pct": -5.0
@@ -1099,8 +1091,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 2,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 5.0,
+                        "post_entry_hours": 5.0,
                     "take_profit_min_pct": 0.4,
                     "force_stop_loss_pct": -2.5
                 }
@@ -1162,7 +1153,7 @@ class KronosTradingGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("黑猫交易系统v2.0")
+        self.root.title("黑猫交易系统v2.2")
         self.root.geometry("1650x980")
         self.root.configure(bg="#f0f0f0")
         
@@ -1183,10 +1174,27 @@ class KronosTradingGUI:
                 # 同时设置 iconphoto 以确保任务栏图标正确显示
                 try:
                     from PIL import Image, ImageTk
-                    img = Image.open(icon_path)
-                    photo = ImageTk.PhotoImage(img)
-                    self.root.iconphoto(True, photo)
-                except Exception:
+                    # 设置多个尺寸的图标以确保在不同缩放级别下都能正常显示
+                    sizes = [16, 32, 48, 64, 128, 256]
+                    photos = []
+                    for size in sizes:
+                        try:
+                            img = Image.open(icon_path)
+                            img = img.resize((size, size), Image.Resampling.LANCZOS)
+                            photo = ImageTk.PhotoImage(img)
+                            photos.append(photo)
+                        except:
+                            pass
+                    if photos:
+                        self.root.iconphoto(True, *photos)
+                except Exception as e:
+                    print(f"设置iconphoto失败: {e}")
+                # 设置Windows AppUserModelID以确保任务栏图标正确关联
+                try:
+                    import ctypes
+                    myappid = 'kronos.trading.app'
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                except:
                     pass
         except Exception as e:
             print(f"设置图标失败: {e}")
@@ -1273,7 +1281,6 @@ class KronosTradingGUI:
         # 策略确认次数变量
         self.entry_confirm_count_var = tk.StringVar(value="2")
         self.reverse_confirm_count_var = tk.StringVar(value="2")
-        self.require_consecutive_prediction_var = tk.StringVar(value="3")
         
         # 开仓后计时参数
         self.post_entry_hours_var = tk.StringVar(value="2")
@@ -2076,7 +2083,7 @@ class KronosTradingGUI:
 
 
 
-        # 行4: AI最小预测偏离度 + 最大资金费率
+        # 行4: AI最小预测偏离度
         row4 = ttk.Frame(params_grid)
         row4.pack(fill=tk.X, pady=(0, 4))
         col1 = ttk.Frame(row4)
@@ -2087,27 +2094,6 @@ class KronosTradingGUI:
             col1, textvariable=self.ai_min_deviation_var, width=18
         )
         ai_min_deviation_entry.pack(fill=tk.X, pady=(0, 0))
-
-        col2 = ttk.Frame(row4)
-        col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
-        ttk.Label(col2, text="最大资金费率 (%):").pack(anchor=tk.W)
-        self.max_funding_var = tk.StringVar(value="1.0")
-        max_funding_entry = ttk.Entry(
-            col2, textvariable=self.max_funding_var, width=18
-        )
-        max_funding_entry.pack(fill=tk.X, pady=(0, 0))
-
-        # 行5: 最小资金费率
-        row5 = ttk.Frame(params_grid)
-        row5.pack(fill=tk.X, pady=(0, 0))
-        col1 = ttk.Frame(row5)
-        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
-        ttk.Label(col1, text="最小资金费率 (%):").pack(anchor=tk.W)
-        self.min_funding_var = tk.StringVar(value="-1.0")
-        min_funding_entry = ttk.Entry(
-            col1, textvariable=self.min_funding_var, width=18
-        )
-        min_funding_entry.pack(fill=tk.X, pady=(0, 0))
 
     def create_control_section(self, parent):
         control_frame = ttk.Frame(parent, style="TFrame", padding=10)
@@ -3210,8 +3196,6 @@ class KronosTradingGUI:
             model = self.model_var.get()
             min_position = self.min_position_var.get()
             ai_min_deviation = self.ai_min_deviation_var.get()
-            max_funding = self.max_funding_var.get()
-            min_funding = self.min_funding_var.get()
 
             # 转换为策略代码（避免中文编码问题）
             strategy_code = strategy_code_map.get(strategy_display, "trend")
@@ -3252,8 +3236,6 @@ class KronosTradingGUI:
             env_vars["MIN_POSITION"] = min_position
             env_vars["AI_MIN_TREND"] = ai_min_trend
             env_vars["AI_MIN_DEVIATION"] = ai_min_deviation
-            env_vars["MAX_FUNDING"] = max_funding
-            env_vars["MIN_FUNDING"] = min_funding
 
             # 使用UTF-8编码保存
             with open(env_path, "w", encoding="utf-8") as f:
@@ -3261,7 +3243,7 @@ class KronosTradingGUI:
                     f.write(f"{key}={val}\n")
 
             self.log(
-                f"参数已保存: 阈值={threshold}, 杠杆={leverage}x, 周期={timeframe}, 间隔={interval}秒, AI趋势={ai_min_trend}, AI偏离={ai_min_deviation}, 资金费率=[{min_funding}%, {max_funding}%]"
+                f"参数已保存: 阈值={threshold}, 杠杆={leverage}x, 周期={timeframe}, 间隔={interval}秒, AI趋势={ai_min_trend}, AI偏离={ai_min_deviation}"
             )
         except Exception as e:
             self.log(f"保存配置失败: {e}")
@@ -3284,8 +3266,6 @@ class KronosTradingGUI:
                 "threshold": "0.008",
                 "ai_min_trend": "0.010",
                 "ai_min_deviation": "0.008",
-                "max_funding": "1.0",
-                "min_funding": "-1.0",
                 "timeframe": "5m",
                 "interval": "120",
             },
@@ -3294,8 +3274,6 @@ class KronosTradingGUI:
                 "threshold": "0.005",
                 "ai_min_trend": "0.003",
                 "ai_min_deviation": "0.005",
-                "max_funding": "2.0",
-                "min_funding": "-2.0",
                 "timeframe": "5m",
                 "interval": "60",
             },
@@ -3304,8 +3282,6 @@ class KronosTradingGUI:
                 "threshold": "0.015",
                 "ai_min_trend": "0.020",
                 "ai_min_deviation": "0.015",
-                "max_funding": "3.0",
-                "min_funding": "-3.0",
                 "timeframe": "5m",
                 "interval": "180",
             },
@@ -3314,8 +3290,6 @@ class KronosTradingGUI:
                 "threshold": "0.0047",
                 "ai_min_trend": "0.0047",
                 "ai_min_deviation": "0.005",
-                "max_funding": "3.0",
-                "min_funding": "-3.0",
                 "timeframe": "5m",
                 "interval": "180",
             },
@@ -3324,8 +3298,6 @@ class KronosTradingGUI:
                 "threshold": "0.006",
                 "ai_min_trend": "0.006",
                 "ai_min_deviation": "0.006",
-                "max_funding": "3.5",
-                "min_funding": "-3.5",
                 "timeframe": "5m",
                 "interval": "180",
             },
@@ -3334,8 +3306,6 @@ class KronosTradingGUI:
         params = strategy_params.get(strategy_key, strategy_params["trend"])
 
         self.ai_min_deviation_var.set(params["ai_min_deviation"])
-        self.max_funding_var.set(params["max_funding"])
-        self.min_funding_var.set(params["min_funding"])
         self.timeframe_var.set(params["timeframe"])
         self.interval_var.set(params["interval"])
 
@@ -3344,7 +3314,7 @@ class KronosTradingGUI:
             f"参数已自动加载 - AI偏离: {params['ai_min_deviation']}"
         )
         self.log(
-            f"资金费率: [{params['min_funding']}%, {params['max_funding']}%], 周期: {params['timeframe']}, 间隔: {params['interval']}秒"
+            f"周期: {params['timeframe']}, 间隔: {params['interval']}秒"
         )
 
     def toggle_api_visibility(self):
@@ -3618,8 +3588,6 @@ class KronosTradingGUI:
             interval = int(self.interval_var.get())
             min_position = float(self.min_position_var.get())
             ai_min_deviation = float(self.ai_min_deviation_var.get())
-            max_funding = float(self.max_funding_var.get())
-            min_funding = float(self.min_funding_var.get())
 
             strategy_map = {
                 "趋势爆发": "trend",
@@ -3646,7 +3614,6 @@ class KronosTradingGUI:
             self.log(f"最小仓位: ${min_position:.2f}")
             self.log(f"间隔: {interval}秒")
             self.log(f"AI偏离最小: {ai_min_deviation}")
-            self.log(f"资金费率: [{min_funding}%, {max_funding}%]")
 
             BinanceAPI()
 
@@ -3685,8 +3652,6 @@ class KronosTradingGUI:
                 strategy_type=strategy_type,
                 min_position=min_position,
                 ai_min_deviation=ai_min_deviation,
-                max_funding=max_funding,
-                min_funding=min_funding,
                 analysis_callback=analysis_callback,
                 strategy_config=ai_strategy_config
             )
@@ -3697,14 +3662,12 @@ class KronosTradingGUI:
                 if hasattr(self, "ai_strategy_config_vars"):
                     entry_count = int(self.ai_strategy_config_vars.get("strategy.entry_confirm_count", self.entry_confirm_count_var).get())
                     reverse_count = int(self.ai_strategy_config_vars.get("strategy.reverse_confirm_count", self.reverse_confirm_count_var).get())
-                    consecutive_pred = int(self.ai_strategy_config_vars.get("strategy.require_consecutive_prediction", self.require_consecutive_prediction_var).get())
                     post_entry_hours = float(self.ai_strategy_config_vars.get("strategy.post_entry_hours", self.post_entry_hours_var).get())
                     take_profit_min_pct = float(self.ai_strategy_config_vars.get("strategy.take_profit_min_pct", self.take_profit_min_pct_var).get())
                 else:
                     # 降级到旧变量
                     entry_count = int(self.entry_confirm_count_var.get())
                     reverse_count = int(self.reverse_confirm_count_var.get())
-                    consecutive_pred = int(self.require_consecutive_prediction_var.get())
                     post_entry_hours = float(self.post_entry_hours_var.get())
                     take_profit_min_pct = float(self.take_profit_min_pct_var.get())
                 
@@ -3713,14 +3676,12 @@ class KronosTradingGUI:
                     self.strategy.entry_confirm_count = entry_count
                 if 1 <= reverse_count <= 10:
                     self.strategy.reverse_confirm_count = reverse_count
-                if 1 <= consecutive_pred <= 10:
-                    self.strategy.require_consecutive_prediction = consecutive_pred
                 if 0.5 <= post_entry_hours <= 24:
                     self.strategy.post_entry_hours = post_entry_hours
                 if 0.1 <= take_profit_min_pct <= 10:
                     self.strategy.take_profit_min_pct = take_profit_min_pct
                     
-                self.log(f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%")
+                self.log(f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%")
             except Exception as e:
                 self.log(f"设置参数失败: {e}, 使用默认值")
 
@@ -4432,7 +4393,7 @@ class KronosTradingGUI:
         # 版本信息
         version_label = ttk.Label(
             info_frame,
-            text="版本 2.0 · 黑猫交易系统v2.0",
+            text="版本 2.2 · 黑猫交易系统v2.2",
             font=("微软雅黑", 8),
             foreground="#95a5a6",
         )
@@ -5354,8 +5315,7 @@ class KronosTradingGUI:
                 "4h": 240,
                 "6h": 360,
                 "12h": 720,
-                "1d": 1440,
-            }
+                "1d": 1440}
             minutes_per_candle = timeframe_minutes.get(timeframe, 5)
             candles_per_day = 1440 // minutes_per_candle
             total_candles = days * candles_per_day
@@ -5955,7 +5915,6 @@ class KronosTradingGUI:
             "strategy": {
                 "entry_confirm_count": 3,
                 "reverse_confirm_count": 2,
-                "require_consecutive_prediction": 2,
                 "post_entry_hours": 6.0,
                 "take_profit_min_pct": 0.5,
                 "force_stop_loss_pct": -2.5
@@ -5999,8 +5958,6 @@ class KronosTradingGUI:
                         self.entry_confirm_count_var.set(value)
                     elif key == "strategy.reverse_confirm_count" and hasattr(self, "reverse_confirm_count_var"):
                         self.reverse_confirm_count_var.set(value)
-                    elif key == "strategy.require_consecutive_prediction" and hasattr(self, "require_consecutive_prediction_var"):
-                        self.require_consecutive_prediction_var.set(value)
                     elif key == "strategy.post_entry_hours" and hasattr(self, "post_entry_hours_var"):
                         self.post_entry_hours_var.set(value)
                     elif key == "strategy.take_profit_min_pct" and hasattr(self, "take_profit_min_pct_var"):
@@ -6039,7 +5996,6 @@ class KronosTradingGUI:
         self._create_ai_strategy_param_row(frame, "basic", "TREND_STRENGTH_THRESHOLD", "趋势强度阈值", "float", 0.001, 0.05, "判断趋势有效的阈值")
         self._create_ai_strategy_param_row(frame, "basic", "LOOKBACK_PERIOD", "回看K线数量", "int", 64, 2048, "技术分析使用的历史数据长度")
         self._create_ai_strategy_param_row(frame, "basic", "PREDICTION_LENGTH", "预测K线数量", "int", 4, 200, "Kronos预测的未来K线数量")
-        self._create_ai_strategy_param_row(frame, "basic", "CHECK_INTERVAL", "检查间隔(秒)", "int", 30, 3600, "系统检查交易信号的间隔")
     
     def _create_ai_strategy_entry_tab(self):
         frame = ttk.Frame(self.ai_strategy_notebook, padding="15")
@@ -6121,7 +6077,6 @@ class KronosTradingGUI:
         
         self._create_ai_strategy_param_row(frame, "strategy", "entry_confirm_count", "开仓确认次数", "int", 1, 10, "开仓信号需要确认的次数")
         self._create_ai_strategy_param_row(frame, "strategy", "reverse_confirm_count", "平仓确认次数", "int", 1, 10, "平仓信号需要确认的次数")
-        self._create_ai_strategy_param_row(frame, "strategy", "require_consecutive_prediction", "连续预测确认", "int", 1, 10, "需要连续多少次预测一致才执行")
         self._create_ai_strategy_param_row(frame, "strategy", "post_entry_hours", "开仓后计时(小时)平仓", "float", 0.5, 24, "开仓后多长时间自动平仓")
         self._create_ai_strategy_param_row(frame, "strategy", "take_profit_min_pct", "最小止盈(%)", "float", 0.1, 10, "最小的止盈比例")
     
@@ -6224,8 +6179,6 @@ class KronosTradingGUI:
                             self.entry_confirm_count_var.set(value)
                         elif param_name == "reverse_confirm_count" and hasattr(self, "reverse_confirm_count_var"):
                             self.reverse_confirm_count_var.set(value)
-                        elif param_name == "require_consecutive_prediction" and hasattr(self, "require_consecutive_prediction_var"):
-                            self.require_consecutive_prediction_var.set(value)
                         elif param_name == "post_entry_hours" and hasattr(self, "post_entry_hours_var"):
                             self.post_entry_hours_var.set(value)
                         elif param_name == "take_profit_min_pct" and hasattr(self, "take_profit_min_pct_var"):
@@ -6299,7 +6252,6 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 1,
-                    "require_consecutive_prediction": 1,
                     "post_entry_hours": 2.0,
                     "take_profit_min_pct": 0.3,
                     "force_stop_loss_pct": -2.0
@@ -6367,7 +6319,6 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 3,
-                    "require_consecutive_prediction": 3,
                     "post_entry_hours": 12.0,
                     "take_profit_min_pct": 0.8,
                     "force_stop_loss_pct": -3.5
@@ -6435,8 +6386,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 2,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 6.0,
+                        "post_entry_hours": 6.0,
                     "take_profit_min_pct": 0.5,
                     "force_stop_loss_pct": -2.5
                 }
@@ -6503,8 +6453,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 1,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 4.0,
+                        "post_entry_hours": 4.0,
                     "take_profit_min_pct": 0.25,
                     "force_stop_loss_pct": -1.5
                 }
@@ -6571,7 +6520,6 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 4,
-                    "require_consecutive_prediction": 4,
                     "post_entry_hours": 24.0,
                     "take_profit_min_pct": 1.2,
                     "force_stop_loss_pct": -5.0
@@ -6639,8 +6587,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 2,
-                    "require_consecutive_prediction": 2,
-                    "post_entry_hours": 5.0,
+                        "post_entry_hours": 5.0,
                     "take_profit_min_pct": 0.4,
                     "force_stop_loss_pct": -2.5
                 }
@@ -8099,7 +8046,6 @@ class StrategyConfig:
     STRATEGY_CONFIG = {{
         "entry_confirm_count": {entry_confirm_count},
         "reverse_confirm_count": {reverse_confirm_count},
-        "require_consecutive_prediction": {require_consecutive_prediction},
         "post_entry_hours": {post_entry_hours},
         "take_profit_min_pct": {take_profit_min_pct},
         "force_stop_loss_pct": {force_stop_loss_pct},
@@ -8155,7 +8101,6 @@ class StrategyConfig:
                 max_add_times=position.get("max_add_times", 3),
                 entry_confirm_count=strategy.get("entry_confirm_count", 3),
                 reverse_confirm_count=strategy.get("reverse_confirm_count", 2),
-                require_consecutive_prediction=strategy.get("require_consecutive_prediction", 2),
                 post_entry_hours=strategy.get("post_entry_hours", 6),
                 take_profit_min_pct=strategy.get("take_profit_min_pct", 0.5),
                 force_stop_loss_pct=strategy.get("force_stop_loss_pct", -3.0)
@@ -8551,14 +8496,13 @@ class StrategyConfig:
         try:
             entry_count = self.entry_confirm_count_var.get()
             reverse_count = self.reverse_confirm_count_var.get()
-            consecutive_pred = self.require_consecutive_prediction_var.get()
             post_entry_hours = self.post_entry_hours_var.get()
             take_profit_min_pct = self.take_profit_min_pct_var.get()
             
             # 这里可以添加实时显示更新逻辑
             # 暂时只记录日志
             self._log_ai_strategy_message(
-                f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
+                f"参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                 "INFO"
             )
         except Exception as e:
@@ -8570,7 +8514,6 @@ class StrategyConfig:
             # 获取Spinbox的值
             entry_count = int(self.entry_confirm_count_var.get())
             reverse_count = int(self.reverse_confirm_count_var.get())
-            consecutive_pred = int(self.require_consecutive_prediction_var.get())
             post_entry_hours = float(self.post_entry_hours_var.get())
             take_profit_min_pct = float(self.take_profit_min_pct_var.get())
             
@@ -8582,7 +8525,6 @@ class StrategyConfig:
                 self._log_ai_strategy_message(f"平仓确认次数超出范围: {reverse_count} (1-10)", "ERROR")
                 return
             if not (1 <= consecutive_pred <= 10):
-                self._log_ai_strategy_message(f"连续预测确认次数超出范围: {consecutive_pred} (1-10)", "ERROR")
                 return
             if not (0.5 <= post_entry_hours <= 24):
                 self._log_ai_strategy_message(f"开仓后计时超出范围: {post_entry_hours} (0.5-24)", "ERROR")
@@ -8595,7 +8537,6 @@ class StrategyConfig:
             if hasattr(self, 'strategy') and self.strategy is not None:
                 self.strategy.entry_confirm_count = entry_count
                 self.strategy.reverse_confirm_count = reverse_count
-                self.strategy.require_consecutive_prediction = consecutive_pred
                 self.strategy.post_entry_hours = post_entry_hours
                 self.strategy.take_profit_min_pct = take_profit_min_pct
                 self.strategy.consecutive_entry_count = 0  # 重置计数器
@@ -8604,7 +8545,7 @@ class StrategyConfig:
                 self.strategy.last_reverse_signal = None  # 重置信号
                 
                 self._log_ai_strategy_message(
-                    f"✅ 参数已应用到当前策略: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
+                    f"✅ 参数已应用到当前策略: 开仓{entry_count}次, 平仓{reverse_count}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                     "SUCCESS"
                 )
                 self._log_ai_strategy_message(
@@ -8613,7 +8554,7 @@ class StrategyConfig:
                 )
             else:
                 self._log_ai_strategy_message(
-                    f"✅ 参数已保存: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
+                    f"✅ 参数已保存: 开仓{entry_count}次, 平仓{reverse_count}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                     "SUCCESS"
                 )
                 self._log_ai_strategy_message(
@@ -8646,7 +8587,6 @@ class StrategyConfig:
             
             settings['confirm_counts']['entry_confirm_count'] = entry_count
             settings['confirm_counts']['reverse_confirm_count'] = reverse_count
-            settings['confirm_counts']['require_consecutive_prediction'] = consecutive_pred
             settings['confirm_counts']['post_entry_hours'] = post_entry_hours
             settings['confirm_counts']['take_profit_min_pct'] = take_profit_min_pct
             settings['confirm_counts']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -8673,18 +8613,16 @@ class StrategyConfig:
                     confirm_counts = settings['confirm_counts']
                     entry_count = confirm_counts.get('entry_confirm_count', 2)
                     reverse_count = confirm_counts.get('reverse_confirm_count', 2)
-                    consecutive_pred = confirm_counts.get('require_consecutive_prediction', 3)
                     post_entry_hours = confirm_counts.get('post_entry_hours', 2.0)
                     take_profit_min_pct = confirm_counts.get('take_profit_min_pct', 0.6)
                     
                     self.entry_confirm_count_var.set(str(entry_count))
                     self.reverse_confirm_count_var.set(str(reverse_count))
-                    self.require_consecutive_prediction_var.set(str(consecutive_pred))
                     self.post_entry_hours_var.set(str(post_entry_hours))
                     self.take_profit_min_pct_var.set(str(take_profit_min_pct))
                     
                     self._log_ai_strategy_message(
-                        f"已加载参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 连续预测{consecutive_pred}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
+                        f"已加载参数设置: 开仓{entry_count}次, 平仓{reverse_count}次, 开仓后计时{post_entry_hours}小时, 最小止盈{take_profit_min_pct}%", 
                         "INFO"
                     )
                     return True
@@ -9059,9 +8997,6 @@ class StrategyConfig:
             interval = int(self.interval_var.get())
             min_position = float(self.min_position_var.get())
             ai_min_deviation = float(self.ai_min_deviation_var.get())
-            max_funding = float(self.max_funding_var.get())
-            min_funding = float(self.min_funding_var.get())
-            
             strategy_map = {
                 "趋势爆发": "trend",
                 "震荡套利": "range",
@@ -9105,8 +9040,6 @@ class StrategyConfig:
                 strategy_type=strategy_type,
                 min_position=min_position,
                 ai_min_deviation=ai_min_deviation,
-                max_funding=max_funding,
-                min_funding=min_funding,
                 analysis_callback=analysis_callback,
                 strategy_config=ai_strategy_config,
                 backtest_mode=True,

@@ -727,18 +727,13 @@ class ProfessionalTradingStrategy:
         if balance:
             self.starting_balance = balance
             print(f"初始余额(不含盈亏): ${self.starting_balance:.2f}")
-            # 初始化风险管理器
-            self.risk_manager = EnhancedRiskManager(self.starting_balance, self.symbol)
-            # 从策略配置中加载风险参数
-            self._sync_risk_manager_config()
-            print(f"风险管理器已初始化")
+            # 风险管理器暂时禁用（缺少模块）
+            self.risk_manager = None
         else:
             # 如果获取余额失败，使用默认值初始化
             self.starting_balance = 0.0
-            self.risk_manager = EnhancedRiskManager(0.0, self.symbol)
-            # 从策略配置中加载风险参数
-            self._sync_risk_manager_config()
-            print("警告: 获取余额失败，使用默认值初始化风险管理器")
+            self.risk_manager = None
+            print("警告: 获取余额失败")
         
         # 初始化余额缓存
         self._cached_balance = self.starting_balance
@@ -992,7 +987,10 @@ class ProfessionalTradingStrategy:
                     return self.current_effective_strategy
 
     def check_trading_hours(self):
-        now = datetime.now()
+        if self.backtest_mode and self.backtest_current_time is not None:
+            now = self.backtest_current_time
+        else:
+            now = datetime.now()
         hour = now.hour
         try:
             start = self.trade_frequency_config.get("active_hours_start", 0)
@@ -2426,7 +2424,8 @@ class ProfessionalTradingStrategy:
 
         in_active_hours = self.check_trading_hours()
         if not in_active_hours:
-            print("非活跃交易时段，信号过滤强度提升")
+            print("非活跃交易时段，禁止开仓")
+            can_open_position = False
 
         # 风险管理器的市场波动性检查
         if self.risk_manager and len(df) >= 100:
@@ -3150,10 +3149,8 @@ class ProfessionalTradingStrategy:
         # 重置策略切换确认计数器
         self.pending_strategy_switch = None
         self.strategy_switch_confirm_count = 0
-        # 初始化风险管理器（回测模式专用）
-        from enhanced_risk_manager import EnhancedRiskManager
-        self.risk_manager = EnhancedRiskManager(initial_capital, self.symbol)
-        self._sync_risk_manager_config()
+        # 风险管理器暂时禁用（缺少模块）
+        self.risk_manager = None
 
     def run_backtest(self, df_historical, initial_capital=10000, fee_rate=0.001, slippage=0.0005, progress_callback=None, log_callback=None, stop_event=None):
         """
@@ -3436,7 +3433,9 @@ class ProfessionalTradingStrategy:
             if not can_open_position:
                 return action, action_reason, trade_info, log_messages
             
-            in_active_hours = True
+            in_active_hours = self.check_trading_hours()
+            if not in_active_hours:
+                can_open_position = False
             
             if self.risk_manager and len(df) >= 100:
                 try:
