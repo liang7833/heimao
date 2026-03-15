@@ -66,6 +66,13 @@ except ImportError as e:
     FinGPTSentimentAnalyzer = None
 
 try:
+    from qwen_analyzer import QwenAnalyzer, get_qwen_analyzer
+except ImportError as e:
+    print(f"Qwen模块导入失败: {e}")
+    QwenAnalyzer = None
+    get_qwen_analyzer = None
+
+try:
     from strategy_coordinator import StrategyCoordinator
 except ImportError as e:
     print(f"策略协调器模块导入失败: {e}")
@@ -366,8 +373,10 @@ class StrategyConfigDialog:
         """获取默认配置"""
         return {
             "coordinator": {
-                "min_signal_strength": 0.15,
+                "min_signal_strength": 0.0025,
                 "max_position_size": 0.1,
+                "kronos_qwen_ratio": 0.7,
+                "tech_fingpt_ratio": 0.8,
                 "sentiment_weight": 0.3,
                 "technical_weight": 0.7,
                 "black_swan_threshold": "HIGH",
@@ -527,6 +536,8 @@ class StrategyConfigDialog:
         
         self._create_param_row(frame, "coordinator", "min_signal_strength", "最小信号强度", "float", 0.0, 1.0, "只有信号强度超过此值才触发交易")
         self._create_param_row(frame, "coordinator", "max_position_size", "最大仓位比例", "float", 0.0, 1.0, "单次交易的最大仓位比例")
+        self._create_param_row(frame, "coordinator", "kronos_qwen_ratio", "Kronos权重", "float", 0.0, 1.0, "Kronos在Kronos+Qwen融合中的权重 (Kronos:Qwen)")
+        self._create_param_row(frame, "coordinator", "tech_fingpt_ratio", "技术分析权重", "float", 0.0, 1.0, "技术分析在技术+FinGPT融合中的权重")
         self._create_param_row(frame, "coordinator", "sentiment_weight", "舆情信号权重", "float", 0.0, 1.0, "FinGPT舆情分析的权重")
         self._create_param_row(frame, "coordinator", "technical_weight", "技术信号权重", "float", 0.0, 1.0, "Kronos技术分析的权重")
         self._create_param_row(frame, "coordinator", "black_swan_threshold", "黑天鹅阈值", "select", None, None, "极端行情敏感度阈值")
@@ -704,6 +715,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0020,
                     "max_position_size": 0.15,
+                    "kronos_qwen_ratio": 0.80,
+                    "tech_fingpt_ratio": 0.90,
                     "sentiment_weight": 0.2,
                     "technical_weight": 0.8,
                     "black_swan_threshold": "LOW",
@@ -770,6 +783,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0045,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.75,
+                    "tech_fingpt_ratio": 0.80,
                     "sentiment_weight": 0.3,
                     "technical_weight": 0.7,
                     "black_swan_threshold": "HIGH",
@@ -836,6 +851,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0030,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.70,
+                    "tech_fingpt_ratio": 0.80,
                     "sentiment_weight": 0.3,
                     "technical_weight": 0.7,
                     "black_swan_threshold": "MEDIUM",
@@ -893,7 +910,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 2,
-                        "post_entry_hours": 6.0,
+                    "post_entry_hours": 6.0,
                     "take_profit_min_pct": 0.5,
                     "force_stop_loss_pct": -2.5
                 }
@@ -902,6 +919,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0025,
                     "max_position_size": 0.12,
+                    "kronos_qwen_ratio": 0.60,
+                    "tech_fingpt_ratio": 0.75,
                     "sentiment_weight": 0.4,
                     "technical_weight": 0.6,
                     "black_swan_threshold": "MEDIUM",
@@ -959,7 +978,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 1,
-                        "post_entry_hours": 4.0,
+                    "post_entry_hours": 4.0,
                     "take_profit_min_pct": 0.25,
                     "force_stop_loss_pct": -1.5
                 }
@@ -968,6 +987,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0060,
                     "max_position_size": 0.08,
+                    "kronos_qwen_ratio": 0.85,
+                    "tech_fingpt_ratio": 0.85,
                     "sentiment_weight": 0.25,
                     "technical_weight": 0.75,
                     "black_swan_threshold": "HIGH",
@@ -1034,6 +1055,8 @@ class StrategyConfigDialog:
                 "coordinator": {
                     "min_signal_strength": 0.0035,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.55,
+                    "tech_fingpt_ratio": 0.55,
                     "sentiment_weight": 0.5,
                     "technical_weight": 0.5,
                     "black_swan_threshold": "MEDIUM",
@@ -1091,7 +1114,7 @@ class StrategyConfigDialog:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 2,
-                        "post_entry_hours": 5.0,
+                    "post_entry_hours": 5.0,
                     "take_profit_min_pct": 0.4,
                     "force_stop_loss_pct": -2.5
                 }
@@ -1153,7 +1176,7 @@ class KronosTradingGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("黑猫交易系统v2.2")
+        self.root.title("黑猫交易系统v3.0")
         self.root.geometry("1650x980")
         self.root.configure(bg="#f0f0f0")
         
@@ -1222,8 +1245,10 @@ class KronosTradingGUI:
 
         # 多智能体量化交易系统属性
         self.fingpt_analyzer = None
+        self.qwen_analyzer = None
         self.strategy_coordinator = None
         self.use_sentiment_analysis = True  # 默认启用舆情分析
+        self.use_qwen_analysis = True  # 默认启用Qwen分析
         self.sentiment_filter_enabled = True  # 默认启用信号过滤
         
         # BTC新闻爬虫
@@ -1268,6 +1293,7 @@ class KronosTradingGUI:
         
         # 初始化AI策略中心相关变量
         self.fingpt_status_var = tk.StringVar(value="未初始化")
+        self.qwen_status_var = tk.StringVar(value="未初始化")
         self.coordinator_status_var = tk.StringVar(value="未初始化")
         
         # 交易统计变量
@@ -1449,6 +1475,7 @@ class KronosTradingGUI:
     def initialize_multi_agent_system(self):
         """初始化多智能体量化交易系统"""
         print("初始化多智能体量化交易系统...")
+        print(f"  [调试] use_qwen_analysis = {self.use_qwen_analysis}")
         
         # 初始化FinGPT舆情分析器
         if FinGPTSentimentAnalyzer is not None and self.use_sentiment_analysis:
@@ -1465,6 +1492,25 @@ class KronosTradingGUI:
             print("  ⚠ FinGPT模块不可用或已禁用")
             self.fingpt_analyzer = None
         
+        # 初始化Qwen分析器
+        print(f"  [调试] QwenAnalyzer is None? {QwenAnalyzer is None}, use_qwen_analysis={self.use_qwen_analysis}")
+        if QwenAnalyzer is not None and self.use_qwen_analysis:
+            try:
+                print("  正在初始化Qwen分析器...")
+                self.qwen_analyzer = get_qwen_analyzer(
+                    symbol="BTC",
+                    use_local_model=True
+                )
+                print("  ✓ Qwen分析器初始化完成")
+            except Exception as e:
+                print(f"  ✗ Qwen分析器初始化失败: {e}")
+                import traceback
+                traceback.print_exc()
+                self.qwen_analyzer = None
+        else:
+            print("  ⚠ Qwen模块不可用或已禁用")
+            self.qwen_analyzer = None
+        
         # 初始化策略协调器
         if StrategyCoordinator is not None:
             try:
@@ -1472,7 +1518,10 @@ class KronosTradingGUI:
                 self.strategy_coordinator = StrategyCoordinator(
                     kronos_model_name="custom:custom_model",
                     use_fingpt=(self.fingpt_analyzer is not None),
-                    symbol="BTC"
+                    use_qwen=(self.qwen_analyzer is not None),
+                    symbol="BTC",
+                    fingpt_analyzer=self.fingpt_analyzer,
+                    qwen_analyzer=self.qwen_analyzer
                 )
                 print("  ✓ 策略协调器初始化完成")
                 
@@ -1512,6 +1561,16 @@ class KronosTradingGUI:
         else:
             self.fingpt_status_var.set("未启用")
             self.fingpt_status_label.config(foreground="#f39c12")  # 橙色
+        
+        # 更新Qwen状态
+        if hasattr(self, 'qwen_analyzer') and self.qwen_analyzer is not None:
+            self.qwen_status_var.set("运行中")
+            if hasattr(self, 'qwen_status_label'):
+                self.qwen_status_label.config(foreground="#27ae60")  # 绿色
+        else:
+            self.qwen_status_var.set("未启用")
+            if hasattr(self, 'qwen_status_label'):
+                self.qwen_status_label.config(foreground="#f39c12")  # 橙色
         
         # 更新策略协调器状态
         if self.strategy_coordinator is not None:
@@ -2025,18 +2084,61 @@ class KronosTradingGUI:
         
         self.model_var.trace_add("write", on_model_change)
 
-        # 刷新模型按钮
+        # 刷新模型按钮和Qwen开关
         refresh_model_frame = ttk.Frame(config_frame)
         refresh_model_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        # Qwen开关
+        self.qwen_main_enabled_var = tk.BooleanVar(value=self.use_qwen_analysis)
+        
+        def on_main_qwen_toggle():
+            self.use_qwen_analysis = self.qwen_main_enabled_var.get()
+            # 同步更新AI策略中心开关
+            if hasattr(self, 'qwen_enabled_var'):
+                self.qwen_enabled_var.set(self.use_qwen_analysis)
+            if self.use_qwen_analysis:
+                print("Qwen分析模块已启用")
+                if QwenAnalyzer is not None:
+                    try:
+                        self.qwen_analyzer = get_qwen_analyzer(
+                            symbol="BTC",
+                            use_local_model=True
+                        )
+                        print("Qwen分析器初始化完成")
+                    except Exception as e:
+                        print(f"Qwen分析器初始化失败: {e}")
+                        self.qwen_analyzer = None
+            else:
+                print("Qwen分析模块已禁用")
+                self.qwen_analyzer = None
+            # 更新策略协调器
+            if self.strategy_coordinator is not None:
+                self.strategy_coordinator.use_qwen = self.use_qwen_analysis
+                self.strategy_coordinator.qwen_analyzer = self.qwen_analyzer
+                self.strategy_coordinator.qwen_available = (self.qwen_analyzer is not None)
+            # 更新状态显示
+            self.update_multi_agent_status()
+        
+        qwen_check = ttk.Checkbutton(
+            refresh_model_frame,
+            text="🔮 启用Qwen分析",
+            variable=self.qwen_main_enabled_var,
+            command=on_main_qwen_toggle
+        )
+        qwen_check.pack(side=tk.LEFT)
+        
         ttk.Button(
             refresh_model_frame, text="刷新模型列表", command=self.refresh_model_list
         ).pack(side=tk.RIGHT)
 
-        # 参数 - 5行两列，共10个参数
+        # 隐藏的杠杆变量（供内部使用）
+        self.leverage_var = tk.StringVar(value="10")
+
+        # 参数 - 2行两列，共4个参数
         params_grid = ttk.Frame(config_frame)
         params_grid.pack(fill=tk.X, pady=(0, 0))
 
-        # 行1: 分析周期 + 杠杆倍数
+        # 行1: 分析周期 + 交易间隔
         row1 = ttk.Frame(params_grid)
         row1.pack(fill=tk.X, pady=(0, 4))
         col1 = ttk.Frame(row1)
@@ -2051,15 +2153,15 @@ class KronosTradingGUI:
 
         col2 = ttk.Frame(row1)
         col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
-        ttk.Label(col2, text="杠杆倍数:").pack(anchor=tk.W)
-        self.leverage_var = tk.StringVar(value="10")
-        leverage_combo = ttk.Combobox(
-            col2, textvariable=self.leverage_var, state="readonly", width=15
+        ttk.Label(col2, text="交易间隔 (秒):").pack(anchor=tk.W)
+        self.interval_var = tk.StringVar(value="120")
+        interval_combo = ttk.Combobox(
+            col2, textvariable=self.interval_var, state="readonly", width=15
         )
-        leverage_combo["values"] = ("1", "2", "3", "5", "10", "20", "25", "50", "75", "100")
-        leverage_combo.pack(fill=tk.X, pady=(0, 0))
+        interval_combo["values"] = ("30", "60", "120", "180", "300", "600")
+        interval_combo.pack(fill=tk.X, pady=(0, 0))
 
-        # 行2: 最小仓位 + 交易间隔
+        # 行2: 最小仓位 + AI最小预测偏离度
         row2 = ttk.Frame(params_grid)
         row2.pack(fill=tk.X, pady=(0, 4))
         col1 = ttk.Frame(row2)
@@ -2073,25 +2175,10 @@ class KronosTradingGUI:
 
         col2 = ttk.Frame(row2)
         col2.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
-        ttk.Label(col2, text="交易间隔 (秒):").pack(anchor=tk.W)
-        self.interval_var = tk.StringVar(value="120")
-        interval_combo = ttk.Combobox(
-            col2, textvariable=self.interval_var, state="readonly", width=15
-        )
-        interval_combo["values"] = ("30", "60", "120", "180", "300", "600")
-        interval_combo.pack(fill=tk.X, pady=(0, 0))
-
-
-
-        # 行4: AI最小预测偏离度
-        row4 = ttk.Frame(params_grid)
-        row4.pack(fill=tk.X, pady=(0, 4))
-        col1 = ttk.Frame(row4)
-        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
-        ttk.Label(col1, text="AI最小预测偏离度:").pack(anchor=tk.W)
+        ttk.Label(col2, text="AI最小预测偏离度:").pack(anchor=tk.W)
         self.ai_min_deviation_var = tk.StringVar(value="0.008")
         ai_min_deviation_entry = ttk.Entry(
-            col1, textvariable=self.ai_min_deviation_var, width=18
+            col2, textvariable=self.ai_min_deviation_var, width=18
         )
         ai_min_deviation_entry.pack(fill=tk.X, pady=(0, 0))
 
@@ -3155,7 +3242,7 @@ class KronosTradingGUI:
                 self.api_key_entry.insert(0, api_key)
             if secret_key:
                 self.secret_key_entry.insert(0, secret_key)
-            self.leverage_var.set(leverage)
+
             self.symbol_var.set(symbol)
             self.strategy_var.set(strategy)
             self.model_var.set(model)
@@ -3188,7 +3275,6 @@ class KronosTradingGUI:
 
             api_key = self.api_key_entry.get().strip()
             secret_key = self.secret_key_entry.get().strip()
-            leverage = self.leverage_var.get()
             interval = self.interval_var.get()
             timeframe = self.timeframe_var.get()
             symbol = self.symbol_var.get()
@@ -3226,15 +3312,12 @@ class KronosTradingGUI:
 
             env_vars["BINANCE_API_KEY"] = api_key
             env_vars["BINANCE_API_SECRET"] = secret_key
-            env_vars["THRESHOLD"] = threshold
-            env_vars["LEVERAGE"] = leverage
             env_vars["CHECK_INTERVAL"] = interval
             env_vars["TIMEFRAME"] = timeframe
             env_vars["SYMBOL"] = symbol
             env_vars["STRATEGY"] = strategy_code
             env_vars["MODEL"] = model
             env_vars["MIN_POSITION"] = min_position
-            env_vars["AI_MIN_TREND"] = ai_min_trend
             env_vars["AI_MIN_DEVIATION"] = ai_min_deviation
 
             # 使用UTF-8编码保存
@@ -3243,7 +3326,7 @@ class KronosTradingGUI:
                     f.write(f"{key}={val}\n")
 
             self.log(
-                f"参数已保存: 阈值={threshold}, 杠杆={leverage}x, 周期={timeframe}, 间隔={interval}秒, AI趋势={ai_min_trend}, AI偏离={ai_min_deviation}"
+                f"参数已保存: 周期={timeframe}, 间隔={interval}秒, 最小仓位={min_position}, AI偏离={ai_min_deviation}"
             )
         except Exception as e:
             self.log(f"保存配置失败: {e}")
@@ -3584,7 +3667,6 @@ class KronosTradingGUI:
             symbol = self.symbol_var.get()
             model_name = self.model_var.get()
             timeframe = self.timeframe_var.get()
-            leverage = int(self.leverage_var.get())
             interval = int(self.interval_var.get())
             min_position = float(self.min_position_var.get())
             ai_min_deviation = float(self.ai_min_deviation_var.get())
@@ -3605,6 +3687,20 @@ class KronosTradingGUI:
                     self.log(f"⚠️ 检测到选择了{self.strategy_var.get()}策略，强制使用5m时间周期")
                     timeframe = "5m"
                     self.timeframe_var.set("5m")
+
+            # 从AI策略配置中获取杠杆
+            leverage = 10
+            ai_strategy_config = None
+            if hasattr(self, "_get_ai_strategy_config_from_ui"):
+                try:
+                    ai_strategy_config = self._get_ai_strategy_config_from_ui()
+                    if ai_strategy_config and "basic" in ai_strategy_config:
+                        leverage = ai_strategy_config["basic"].get("LEVERAGE", 10)
+                except Exception as e:
+                    self.log(f"⚠ 从AI策略配置获取杠杆失败: {e}")
+            
+            # 更新杠杆变量
+            self.leverage_var.set(str(leverage))
 
             self.log(f"交易对: {symbol}")
             self.log(f"策略: {self.strategy_var.get()}")
@@ -3873,8 +3969,23 @@ class KronosTradingGUI:
 
     def _update_system_info(self):
         try:
-            # CPU信息
-            cpu_percent = psutil.cpu_percent(interval=0.5)
+            # CPU信息 - 使用非阻塞方式获取
+            if not hasattr(self, '_last_cpu_times'):
+                self._last_cpu_times = psutil.cpu_times()
+                self._last_cpu_percent = 0.0
+            
+            current_cpu_times = psutil.cpu_times()
+            # 计算CPU使用率（不阻塞）
+            delta_idle = current_cpu_times.idle - self._last_cpu_times.idle
+            delta_total = sum(current_cpu_times) - sum(self._last_cpu_times)
+            
+            if delta_total > 0:
+                cpu_percent = 100.0 - (delta_idle / delta_total * 100.0)
+                self._last_cpu_percent = cpu_percent
+            else:
+                cpu_percent = self._last_cpu_percent
+            
+            self._last_cpu_times = current_cpu_times
             self.cpu_var.set(f"{cpu_percent:.1f}%")
             self.cpu_progress["value"] = cpu_percent
 
@@ -3916,12 +4027,16 @@ class KronosTradingGUI:
                 self.gpu_detail_label.config(text=str(e)[:30])
 
             # 磁盘信息
-            disk = psutil.disk_usage("C:")
-            self.disk_var.set(f"{disk.percent:.1f}%")
-            self.disk_progress["value"] = disk.percent
-            self.disk_detail_label.config(
-                text=f"已用: {disk.used/1024**3:.1f}GB / {disk.total/1024**3:.1f}GB"
-            )
+            try:
+                disk = psutil.disk_usage("C:")
+                self.disk_var.set(f"{disk.percent:.1f}%")
+                self.disk_progress["value"] = disk.percent
+                self.disk_detail_label.config(
+                    text=f"已用: {disk.used/1024**3:.1f}GB / {disk.total/1024**3:.1f}GB"
+                )
+            except Exception:
+                self.disk_var.set("N/A")
+                self.disk_detail_label.config(text="无法获取磁盘信息")
 
         except Exception as e:
             print(f"系统监控更新错误: {e}")
@@ -4393,7 +4508,7 @@ class KronosTradingGUI:
         # 版本信息
         version_label = ttk.Label(
             info_frame,
-            text="版本 2.2 · 黑猫交易系统v2.2",
+            text="版本 3.0 · 黑猫交易系统v3.0",
             font=("微软雅黑", 8),
             foreground="#95a5a6",
         )
@@ -5857,6 +5972,8 @@ class KronosTradingGUI:
             "coordinator": {
                 "min_signal_strength": 0.0030,
                 "max_position_size": 0.1,
+                "kronos_qwen_ratio": 0.7,
+                "tech_fingpt_ratio": 0.8,
                 "sentiment_weight": 0.3,
                 "technical_weight": 0.7,
                 "black_swan_threshold": "MEDIUM",
@@ -5979,10 +6096,23 @@ class KronosTradingGUI:
         
         ttk.Label(frame, text="【协调器参数】", font=("微软雅黑", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
         
+        # 融合逻辑说明
+        info_frame = ttk.LabelFrame(frame, text="信号融合逻辑", padding=10)
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        info_text = (
+            "• Qwen启用时：\n"
+            "  第一步：Kronos + Qwen（可调）\n"
+            "  第二步：技术分析 + FinGPT（可调）\n\n"
+            "• Qwen不启用时：\n"
+            "  Kronos + FinGPT（可调）"
+        )
+        ttk.Label(info_frame, text=info_text, justify=tk.LEFT).pack(anchor=tk.W)
+        
         self._create_ai_strategy_param_row(frame, "coordinator", "min_signal_strength", "最小信号强度", "float", 0.0, 1.0, "只有信号强度超过此值才触发交易")
         self._create_ai_strategy_param_row(frame, "coordinator", "max_position_size", "最大仓位比例", "float", 0.0, 1.0, "单次交易的最大仓位比例")
-        self._create_ai_strategy_param_row(frame, "coordinator", "sentiment_weight", "舆情信号权重", "float", 0.0, 1.0, "FinGPT舆情分析的权重")
-        self._create_ai_strategy_param_row(frame, "coordinator", "technical_weight", "技术信号权重", "float", 0.0, 1.0, "Kronos技术分析的权重")
+        self._create_ai_strategy_param_row(frame, "coordinator", "kronos_qwen_ratio", "Kronos权重", "float", 0.0, 1.0, "Kronos在Kronos+Qwen融合中的权重（默认0.7，即7:3）")
+        self._create_ai_strategy_param_row(frame, "coordinator", "tech_fingpt_ratio", "技术分析权重", "float", 0.0, 1.0, "技术分析在技术+FinGPT融合中的权重（默认0.8，即8:2）")
         self._create_ai_strategy_param_row(frame, "coordinator", "black_swan_threshold", "黑天鹅阈值", "select", None, None, "极端行情敏感度阈值")
         self._create_ai_strategy_param_row(frame, "coordinator", "enable_adaptive_filtering", "自适应过滤", "bool", None, None, "启用动态参数调整")
     
@@ -6194,6 +6324,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0020,
                     "max_position_size": 0.15,
+                    "kronos_qwen_ratio": 0.80,
+                    "tech_fingpt_ratio": 0.90,
                     "sentiment_weight": 0.2,
                     "technical_weight": 0.8,
                     "black_swan_threshold": "LOW",
@@ -6261,6 +6393,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0045,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.75,
+                    "tech_fingpt_ratio": 0.80,
                     "sentiment_weight": 0.3,
                     "technical_weight": 0.7,
                     "black_swan_threshold": "HIGH",
@@ -6328,6 +6462,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0030,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.70,
+                    "tech_fingpt_ratio": 0.80,
                     "sentiment_weight": 0.3,
                     "technical_weight": 0.7,
                     "black_swan_threshold": "MEDIUM",
@@ -6386,7 +6522,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 3,
                     "reverse_confirm_count": 2,
-                        "post_entry_hours": 6.0,
+                    "post_entry_hours": 6.0,
                     "take_profit_min_pct": 0.5,
                     "force_stop_loss_pct": -2.5
                 }
@@ -6395,6 +6531,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0025,
                     "max_position_size": 0.12,
+                    "kronos_qwen_ratio": 0.60,
+                    "tech_fingpt_ratio": 0.75,
                     "sentiment_weight": 0.4,
                     "technical_weight": 0.6,
                     "black_swan_threshold": "MEDIUM",
@@ -6453,7 +6591,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 2,
                     "reverse_confirm_count": 1,
-                        "post_entry_hours": 4.0,
+                    "post_entry_hours": 4.0,
                     "take_profit_min_pct": 0.25,
                     "force_stop_loss_pct": -1.5
                 }
@@ -6462,6 +6600,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0060,
                     "max_position_size": 0.08,
+                    "kronos_qwen_ratio": 0.85,
+                    "tech_fingpt_ratio": 0.85,
                     "sentiment_weight": 0.25,
                     "technical_weight": 0.75,
                     "black_swan_threshold": "HIGH",
@@ -6529,6 +6669,8 @@ class KronosTradingGUI:
                 "coordinator": {
                     "min_signal_strength": 0.0035,
                     "max_position_size": 0.1,
+                    "kronos_qwen_ratio": 0.55,
+                    "tech_fingpt_ratio": 0.55,
                     "sentiment_weight": 0.5,
                     "technical_weight": 0.5,
                     "black_swan_threshold": "MEDIUM",
@@ -6587,7 +6729,7 @@ class KronosTradingGUI:
                 "strategy": {
                     "entry_confirm_count": 1,
                     "reverse_confirm_count": 2,
-                        "post_entry_hours": 5.0,
+                    "post_entry_hours": 5.0,
                     "take_profit_min_pct": 0.4,
                     "force_stop_loss_pct": -2.5
                 }
@@ -6641,6 +6783,19 @@ class KronosTradingGUI:
         )
         self.fingpt_status_label.pack(side=tk.LEFT)
         
+        # Qwen状态
+        qwen_status_frame = ttk.Frame(status_frame)
+        qwen_status_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        ttk.Label(qwen_status_frame, text="Qwen:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.qwen_status_label = ttk.Label(
+            qwen_status_frame,
+            textvariable=self.qwen_status_var,
+            font=("微软雅黑", 10, "bold"),
+            foreground="#f39c12"
+        )
+        self.qwen_status_label.pack(side=tk.LEFT)
+        
         # 策略协调器状态
         coordinator_status_frame = ttk.Frame(status_frame)
         coordinator_status_frame.pack(side=tk.LEFT, padx=(0, 20))
@@ -6653,6 +6808,65 @@ class KronosTradingGUI:
             foreground="#27ae60"
         )
         self.coordinator_status_label.pack(side=tk.LEFT)
+
+        # ==================== Qwen模块配置 ====================
+        qwen_config_frame = ttk.LabelFrame(main_frame, text="🔮 Qwen分析模块配置", padding="20")
+        qwen_config_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        qwen_control_row = ttk.Frame(qwen_config_frame)
+        qwen_control_row.pack(fill=tk.X)
+        
+        # Qwen开关
+        self.qwen_enabled_var = tk.BooleanVar(value=self.use_qwen_analysis)
+        
+        def on_qwen_toggle():
+            self.use_qwen_analysis = self.qwen_enabled_var.get()
+            # 同步更新主面板开关
+            if hasattr(self, 'qwen_main_enabled_var'):
+                self.qwen_main_enabled_var.set(self.use_qwen_analysis)
+            if self.use_qwen_analysis:
+                print("Qwen分析模块已启用")
+                # 重新初始化多智能体系统以启用Qwen
+                if QwenAnalyzer is not None:
+                    try:
+                        self.qwen_analyzer = get_qwen_analyzer(
+                            symbol="BTC",
+                            use_local_model=True
+                        )
+                        print("Qwen分析器初始化完成")
+                    except Exception as e:
+                        print(f"Qwen分析器初始化失败: {e}")
+                        self.qwen_analyzer = None
+            else:
+                print("Qwen分析模块已禁用")
+                self.qwen_analyzer = None
+            # 更新策略协调器
+            if self.strategy_coordinator is not None:
+                self.strategy_coordinator.use_qwen = self.use_qwen_analysis
+                self.strategy_coordinator.qwen_analyzer = self.qwen_analyzer
+                self.strategy_coordinator.qwen_available = (self.qwen_analyzer is not None)
+            # 更新状态显示
+            self.update_multi_agent_status()
+        
+        qwen_check = ttk.Checkbutton(
+            qwen_control_row,
+            text="启用Qwen分析",
+            variable=self.qwen_enabled_var,
+            command=on_qwen_toggle
+        )
+        qwen_check.pack(side=tk.LEFT)
+        
+        ttk.Label(qwen_control_row, text="权重比例: Kronos:Qwen:FinGPT = 5:3:2", 
+                 foreground="#7f8c8d", font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(20, 0))
+        
+        qwen_desc = ttk.Label(
+            qwen_config_frame,
+            text="Qwen分析使用Qwen 3.5:4B模型进行K线技术分析，与Kronos和FinGPT协同工作，提供更全面的交易建议。",
+            font=("微软雅黑", 9),
+            foreground="#7f8c8d",
+            wraplength=700
+        )
+        qwen_desc.pack(anchor=tk.W, pady=(10, 0))
 
         # ==================== AI策略中心控制面板 ====================
         scheduler_frame = ttk.LabelFrame(main_frame, text="🤖 AI策略中心 - 自动优化系统", padding="20")
@@ -8993,7 +9207,6 @@ class StrategyConfig:
             symbol = self.symbol_var.get()
             model_name = self.model_var.get()
             timeframe = self.timeframe_var.get()
-            leverage = int(self.leverage_var.get())
             interval = int(self.interval_var.get())
             min_position = float(self.min_position_var.get())
             ai_min_deviation = float(self.ai_min_deviation_var.get())
@@ -9014,11 +9227,24 @@ class StrategyConfig:
                     timeframe = "5m"
                     self.timeframe_var.set("5m")
 
-            BinanceAPI()
-            
-            # 获取完整的AI策略配置
+            # 从AI策略配置中获取杠杆
+            leverage = 10
             ai_strategy_config = None
             if hasattr(self, "_get_ai_strategy_config_from_ui"):
+                try:
+                    ai_strategy_config = self._get_ai_strategy_config_from_ui()
+                    if ai_strategy_config and "basic" in ai_strategy_config:
+                        leverage = ai_strategy_config["basic"].get("LEVERAGE", 10)
+                except Exception as e:
+                    self.backtest_log_text.insert(tk.END, f"[策略创建] 从AI策略配置获取杠杆失败: {e}\n")
+            
+            # 更新杠杆变量
+            self.leverage_var.set(str(leverage))
+
+            BinanceAPI()
+            
+            # 获取完整的AI策略配置（如果还没获取到）
+            if ai_strategy_config is None and hasattr(self, "_get_ai_strategy_config_from_ui"):
                 try:
                     ai_strategy_config = self._get_ai_strategy_config_from_ui()
                     self.backtest_log_text.insert(tk.END, "[策略创建] 已获取AI策略配置\n")
@@ -9477,10 +9703,17 @@ class StrategyConfig:
 
 
 def main():
-    root = tk.Tk()
-    root.withdraw()  # 先隐藏窗口
-    KronosTradingGUI(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        root.withdraw()  # 先隐藏窗口
+        KronosTradingGUI(root)
+        root.mainloop()
+    except KeyboardInterrupt:
+        print("\n程序被用户中断，正在退出...")
+    except Exception as e:
+        print(f"\n程序发生错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

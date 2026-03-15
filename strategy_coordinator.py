@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""策略协调器 - 整合Kronos预测信号和FinGPT舆情信号，生成最终交易决策"""
+"""策略协调器 - 整合Kronos预测信号、Qwen分析和FinGPT舆情信号，生成最终交易决策"""
 
 import os
 import json
@@ -20,6 +20,11 @@ try:
 except ImportError:
     print("警告: fingpt_analyzer模块导入失败，部分功能受限")
 
+try:
+    from qwen_analyzer import QwenAnalyzer, get_qwen_analyzer
+except ImportError:
+    print("警告: qwen_analyzer模块导入失败，部分功能受限")
+
 
 
 
@@ -29,21 +34,26 @@ class StrategyCoordinator:
     def __init__(self, 
                  kronos_model_name: str = "kronos-small",
                  use_fingpt: bool = True,
+                 use_qwen: bool = False,
                  symbol: str = "BTC",
                  kronos_analyzer = None,
-                 fingpt_analyzer = None):
+                 fingpt_analyzer = None,
+                 qwen_analyzer = None):
         """
         初始化策略协调器
         
         Args:
             kronos_model_name: Kronos模型名称
             use_fingpt: 是否使用FinGPT舆情分析
+            use_qwen: 是否使用Qwen分析
             symbol: 交易品种符号
             kronos_analyzer: 可选的外部Kronos分析器实例（避免循环创建）
             fingpt_analyzer: 可选的外部FinGPT分析器实例（避免循环创建）
+            qwen_analyzer: 可选的外部Qwen分析器实例（避免循环创建）
         """
         self.symbol = symbol
         self.use_fingpt = use_fingpt
+        self.use_qwen = use_qwen
         
         print(f"初始化策略协调器 ({symbol})...")
         
@@ -86,12 +96,35 @@ class StrategyCoordinator:
             else:
                 self.fingpt_available = False
         
+        # 初始化Qwen分析器（如果外部没有提供）
+        if qwen_analyzer is not None:
+            print("  使用外部提供的Qwen分析器...")
+            self.qwen_analyzer = qwen_analyzer
+            self.qwen_available = True
+            print("  ✓ Qwen分析器就绪")
+        else:
+            self.qwen_analyzer = None
+            if use_qwen:
+                print("  加载Qwen分析器...")
+                try:
+                    self.qwen_analyzer = get_qwen_analyzer(
+                        symbol=symbol,
+                        use_local_model=True
+                    )
+                    self.qwen_available = True
+                    print("  ✓ Qwen分析器就绪")
+                except Exception as e:
+                    print(f"  ✗ Qwen分析器加载失败: {e}")
+                    self.qwen_available = False
+            else:
+                self.qwen_available = False
+        
         # 策略配置
         self.config = {
             "min_signal_strength": 0.0025,  # 最小信号强度（与Kronos趋势强度范围匹配：0.002-0.01）
             "max_position_size": 0.1,    # 最大仓位比例
-            "sentiment_weight": 0.3,     # 舆情权重
-            "technical_weight": 0.7,     # 技术权重
+            "kronos_qwen_ratio": 0.7,      # Kronos在Kronos+Qwen融合中的权重（默认0.7，即7:3）
+            "tech_fingpt_ratio": 0.8,      # 技术分析在技术+FinGPT融合中的权重（默认0.8，即8:2）
             "black_swan_threshold": "HIGH",  # 黑天鹅风险阈值
             "enable_adaptive_filtering": True,  # 启用自适应过滤
         }
@@ -106,7 +139,13 @@ class StrategyCoordinator:
             "last_update": datetime.now().isoformat()
         }
         
-        print(f"策略协调器初始化完成 (Kronos: {self.kronos_available}, FinGPT: {self.fingpt_available})")
+        print(f"策略协调器初始化完成 (Kronos: {self.kronos_available}, Qwen: {self.qwen_available}, FinGPT: {self.fingpt_available})")
+        if self.use_qwen:
+            print(f"  ✓ Qwen分析已启用")
+            print(f"  ✓ 权重配置: Kronos:Qwen={self.config.get('kronos_qwen_ratio'):.1f}:{1 - self.config.get('kronos_qwen_ratio'):.1f}, 技术:FinGPT={self.config.get('tech_fingpt_ratio'):.1f}:{1 - self.config.get('tech_fingpt_ratio'):.1f}")
+        else:
+            print(f"  ✗ Qwen分析已禁用")
+            print(f"  ✓ 权重配置: 技术:FinGPT={self.config.get('tech_fingpt_ratio'):.1f}:{1 - self.config.get('tech_fingpt_ratio'):.1f}")
     
     def analyze_market(self, market_data: pd.DataFrame) -> Dict:
         """综合分析市场数据，生成交易决策
@@ -140,11 +179,46 @@ class StrategyCoordinator:
                 print(f"    ✗ Kronos分析失败: {e}")
                 kronos_signal = None
         
-        # 步骤2: FinGPT舆情分析
+        # 步骤2: Qwen技术分析
+        qwen_signal = None
+        print(f"  [Qwen] 状态检查 - use_qwen={self.use_qwen}, qwen_available={self.qwen_available}")
+        if self.use_qwen and self.qwen_available and self.qwen_analyzer:
+            try:
+                print("  2. Qwen技术分析...")
+                qwen_signal = self.qwen_analyzer.get_enhanced_signal(market_data)
+                if qwen_signal:
+                    print(f"    ✓ Qwen分析成功")
+                    print(f"    - 方向: {qwen_signal.get('trend_direction', '未知')}")
+                    print(f"    - 强度: {qwen_signal.get('trend_strength', 0):.3f}")
+                    print(f"    - 方法: {qwen_signal.get('analysis_method', '未知')}")
+                    # 如果Qwen没有止盈止损，使用Kronos的
+                    if kronos_signal and qwen_signal:
+                        need_update = False
+                        if "pred_support" not in qwen_signal or qwen_signal["pred_support"] is None or qwen_signal["pred_support"] == 0:
+                            qwen_signal["pred_support"] = kronos_signal.get("pred_support")
+                            need_update = True
+                        if "pred_resistance" not in qwen_signal or qwen_signal["pred_resistance"] is None or qwen_signal["pred_resistance"] == 0:
+                            qwen_signal["pred_resistance"] = kronos_signal.get("pred_resistance")
+                            need_update = True
+                        if "current_price" not in qwen_signal or qwen_signal["current_price"] is None or qwen_signal["current_price"] == 0:
+                            qwen_signal["current_price"] = kronos_signal.get("current_price")
+                            need_update = True
+                        if need_update:
+                            print(f"    ✓ 使用Kronos的止盈止损值")
+            except Exception as e:
+                print(f"    ✗ Qwen分析失败: {e}")
+                import traceback
+                traceback.print_exc()
+                qwen_signal = None
+        else:
+            print(f"  ⏭️  跳过Qwen分析 (未启用或不可用)")
+        
+        # 步骤3: FinGPT舆情分析
         sentiment_analysis = None
         if self.fingpt_available and self.fingpt_analyzer:
             try:
-                print("  2. FinGPT舆情分析...")
+                step_num = 4 if qwen_signal else 3
+                print(f"  {step_num}. FinGPT舆情分析...")
                 sentiment_analysis = self.fingpt_analyzer.analyze_market_sentiment(self.symbol)
                 if sentiment_analysis:
                     print(f"    - 情绪: {sentiment_analysis.get('overall_sentiment', '未知')}")
@@ -154,12 +228,14 @@ class StrategyCoordinator:
                 print(f"    ✗ FinGPT分析失败: {e}")
                 sentiment_analysis = None
         
-        # 步骤3: 信号整合与过滤
-        print("  3. 信号整合与过滤...")
-        final_decision = self._integrate_signals(kronos_signal, sentiment_analysis)
+        # 步骤4: 信号整合与过滤
+        step_num = 5 if qwen_signal and sentiment_analysis else (4 if (qwen_signal or sentiment_analysis) else 3)
+        print(f"  {step_num}. 信号整合与过滤...")
+        final_decision = self._integrate_signals(kronos_signal, qwen_signal, sentiment_analysis)
         
-        # 步骤4: 生成交易建议
-        print("  4. 生成交易建议...")
+        # 步骤5: 生成交易建议
+        step_num += 1
+        print(f"  {step_num}. 生成交易建议...")
         trading_recommendation = self._generate_trading_recommendation(final_decision)
         
         # 更新性能统计
@@ -180,10 +256,12 @@ class StrategyCoordinator:
             "symbol": self.symbol,
             "analysis_summary": {
                 "kronos_available": self.kronos_available,
+                "qwen_available": self.qwen_available,
                 "fingpt_available": self.fingpt_available,
-                "signal_integrated": kronos_signal is not None or sentiment_analysis is not None
+                "signal_integrated": kronos_signal is not None or qwen_signal is not None or sentiment_analysis is not None
             },
             "kronos_signal": kronos_signal,
+            "qwen_signal": qwen_signal,
             "sentiment_analysis": sentiment_analysis,
             "integration_result": final_decision,
             "trading_recommendation": trading_recommendation,
@@ -198,11 +276,13 @@ class StrategyCoordinator:
     
     def _integrate_signals(self, 
                           kronos_signal: Optional[Dict], 
-                          sentiment_analysis: Optional[Dict]) -> Dict:
-        """整合Kronos信号和舆情信号
+                          qwen_signal: Optional[Dict] = None,
+                          sentiment_analysis: Optional[Dict] = None) -> Dict:
+        """整合Kronos信号、Qwen分析和舆情信号
         
         Args:
             kronos_signal: Kronos技术信号
+            qwen_signal: Qwen分析信号
             sentiment_analysis: 舆情分析结果
             
         Returns:
@@ -210,6 +290,7 @@ class StrategyCoordinator:
         """
         integration_result = {
             "kronos_signal_present": kronos_signal is not None,
+            "qwen_signal_present": qwen_signal is not None,
             "sentiment_analysis_present": sentiment_analysis is not None,
             "signal_filtered": False,
             "filter_reason": None,
@@ -230,67 +311,32 @@ class StrategyCoordinator:
             })
             return integration_result
         
-        # 检查信号强度是否满足最小要求
-        trend_strength = kronos_signal.get("trend_strength", 0.0)
-        min_strength = self.config.get("min_signal_strength", 0.0025)
-        if trend_strength < min_strength:
-            integration_result.update({
-                "signal_filtered": True,
-                "filter_reason": f"信号强度过低 ({trend_strength:.4f} < {min_strength:.4f})",
-                "filtered_by_strength": True,
-                "final_signal": None,
-                "integration_method": "信号强度过滤"
-            })
-            print(f"    ⚠️  信号被过滤: 信号强度过低 ({trend_strength:.4f} < {min_strength:.4f})")
-            return integration_result
-        
-        # 复制Kronos信号作为基础，保留原始信号有效性
-        integrated_signal = kronos_signal.copy()
-        
-        # 如果没有舆情分析，直接使用Kronos信号
-        if not sentiment_analysis:
-            integration_result.update({
-                "final_signal": integrated_signal,
-                "integration_method": "仅Kronos信号"
-            })
-            return integration_result
-        
         # 检查风险等级：HIGH 风险时直接过滤信号
-        risk_level = sentiment_analysis.get("risk_level", "LOW")
-        
-        # 根据风险等级决定是否过滤
-        if risk_level == "HIGH":
-            integration_result.update({
-                "signal_filtered": True,
-                "filter_reason": "FinGPT检测到高风险，建议观望",
-                "filtered_by_risk": True,
-                "final_signal": None,
-                "integration_method": "高风险过滤"
-            })
-            print(f"    ⚠️  信号被过滤: 检测到高风险({risk_level})，建议观望")
-            return integration_result
-        
-        # 使用FinGPT调整信号强度（中低风险时）
-        if self.fingpt_analyzer:
-            try:
-                # 信号融合：结合技术信号和舆情信号（但保留原始信号有效性）
-                integrated_signal = self._fuse_signals(integrated_signal, sentiment_analysis)
-                integration_result["final_signal"] = integrated_signal
-                integration_result["integration_method"] = "加权融合（保留原始信号有效性）"
-                
-            except Exception as e:
-                print(f"信号整合失败: {e}")
+        if sentiment_analysis:
+            risk_level = sentiment_analysis.get("risk_level", "LOW")
+            if risk_level == "HIGH":
                 integration_result.update({
-                    "final_signal": kronos_signal,
-                    "integration_method": "整合失败，使用原始信号"
+                    "signal_filtered": True,
+                    "filter_reason": "FinGPT检测到高风险，建议观望",
+                    "filtered_by_risk": True,
+                    "integration_method": "高风险过滤"
                 })
-        else:
+                print(f"    ⚠️  信号被过滤: 检测到高风险({risk_level})，建议观望")
+                return integration_result
+        
+        # 三模型加权融合（先融合再检查强度）
+        try:
+            integrated_signal = self._fuse_signals(kronos_signal, qwen_signal, sentiment_analysis)
+            integration_result["final_signal"] = integrated_signal
+            integration_result["integration_method"] = "三模型加权融合"
+        except Exception as e:
+            print(f"信号融合失败: {e}")
             integration_result.update({
                 "final_signal": kronos_signal,
-                "integration_method": "FinGPT不可用，使用原始信号"
+                "integration_method": "融合失败，使用Kronos原始信号"
             })
         
-        # 最后检查：融合后的信号强度是否仍满足要求
+        # 检查融合后的信号强度是否满足要求
         final_signal = integration_result.get("final_signal")
         if final_signal:
             final_strength = final_signal.get("trend_strength", 0.0)
@@ -300,7 +346,6 @@ class StrategyCoordinator:
                     "signal_filtered": True,
                     "filter_reason": f"融合后信号强度过低 ({final_strength:.4f} < {min_strength:.4f})",
                     "filtered_by_strength": True,
-                    "final_signal": None,
                     "integration_method": "融合后信号强度过滤"
                 })
                 print(f"    ⚠️  信号被过滤: 融合后信号强度过低 ({final_strength:.4f} < {min_strength:.4f})")
@@ -308,75 +353,152 @@ class StrategyCoordinator:
         return integration_result
     
     def _fuse_signals(self, 
-                     technical_signal: Dict, 
-                     sentiment_analysis: Dict) -> Dict:
-        """融合技术信号和舆情信号
+                     kronos_signal: Dict, 
+                     qwen_signal: Optional[Dict] = None,
+                     sentiment_analysis: Optional[Dict] = None) -> Dict:
+        """融合信号（使用配置的权重）
+        
+        Qwen启用时: 
+            第一步: Kronos + Qwen (使用kronos_qwen_ratio)
+            第二步: 第一步结果 + FinGPT (使用tech_fingpt_ratio)
+        
+        Qwen不启用时:
+            Kronos + FinGPT (使用tech_fingpt_ratio)
         
         Args:
-            technical_signal: 技术分析信号
-            sentiment_analysis: 舆情分析结果
+            kronos_signal: Kronos技术分析信号
+            qwen_signal: Qwen分析信号
+            sentiment_analysis: FinGPT舆情分析结果
             
         Returns:
             融合后的信号
         """
-        fused_signal = technical_signal.copy()
+        fused_signal = kronos_signal.copy()
         
-        # 提取关键指标
-        tech_strength = technical_signal.get("trend_strength", 0.0)
-        sentiment_score = sentiment_analysis.get("sentiment_score", 0.0)
-        risk_level = sentiment_analysis.get("risk_level", "LOW")
-        overall_sentiment = sentiment_analysis.get("overall_sentiment", "NEUTRAL")
+        # 从配置获取权重
+        kronos_qwen_ratio = self.config.get("kronos_qwen_ratio", 0.7)
+        tech_fingpt_ratio = self.config.get("tech_fingpt_ratio", 0.8)
         
-        # 方向一致性检查
-        tech_direction = technical_signal.get("trend_direction", "NEUTRAL")
-        sentiment_direction = "BULLISH" if sentiment_score > 0.1 else "BEARISH" if sentiment_score < -0.1 else "NEUTRAL"
+        # 将方向转换为数值信号（LONG=1, SHORT=-1, NEUTRAL=0）
+        def direction_to_value(direction):
+            if direction == "LONG":
+                return 1
+            elif direction == "SHORT":
+                return -1
+            else:
+                return 0
         
-        direction_consistent = (
-            (tech_direction == "LONG" and sentiment_direction in ["BULLISH", "NEUTRAL"]) or
-            (tech_direction == "SHORT" and sentiment_direction in ["BEARISH", "NEUTRAL"]) or
-            tech_direction == "NEUTRAL"
-        )
+        # 第一步：Kronos + Qwen（使用kronos_qwen_ratio）
+        kronos_strength = kronos_signal.get("trend_strength", 0.0)
+        kronos_direction = kronos_signal.get("trend_direction", "NEUTRAL")
+        kronos_dir_value = direction_to_value(kronos_direction)
+        # 将强度乘以方向值：LONG为正，SHORT为负，NEUTRAL为0
+        kronos_signed_strength = kronos_strength * kronos_dir_value
+        print(f"    [Kronos] 信号: {kronos_direction} (强度: {kronos_strength:.4f}, 带符号强度: {kronos_signed_strength:.4f})")
         
-        # 计算融合权重
-        sentiment_weight = self.config["sentiment_weight"]
-        technical_weight = self.config["technical_weight"]
+        step1_signed_strength = kronos_signed_strength
+        step1_direction_value = kronos_dir_value
         
-        # 根据风险等级调整权重
-        risk_multiplier = {
-            "LOW": 1.0,
-            "MEDIUM": 0.7,
-            "HIGH": 0.3
-        }.get(risk_level, 1.0)
-        
-        # 调整信号强度
-        if direction_consistent:
-            # 方向一致，增强信号
-            sentiment_boost = abs(sentiment_score) * sentiment_weight
-            fused_strength = tech_strength * (1 + sentiment_boost)
+        if qwen_signal and qwen_signal.get("signal_valid", True):
+            qwen_strength = qwen_signal.get("trend_strength", 0.0)
+            qwen_direction = qwen_signal.get("trend_direction", "NEUTRAL")
+            qwen_dir_value = direction_to_value(qwen_direction)
+            # 将强度乘以方向值：LONG为正，SHORT为负，NEUTRAL为0
+            qwen_signed_strength = qwen_strength * qwen_dir_value
+            print(f"    [Qwen] 信号: {qwen_direction} (强度: {qwen_strength:.4f}, 带符号强度: {qwen_signed_strength:.4f})")
+            
+            # Kronos:Qwen = kronos_qwen_ratio : (1-kronos_qwen_ratio) 融合（使用带符号强度）
+            q_ratio = 1 - kronos_qwen_ratio
+            step1_signed_strength = (kronos_signed_strength * kronos_qwen_ratio) + (qwen_signed_strength * q_ratio)
+            step1_direction_value = (kronos_dir_value * kronos_qwen_ratio) + (qwen_dir_value * q_ratio)
+            # 最终强度取绝对值
+            step1_strength = abs(step1_signed_strength)
+            print(f"    [第一步] Kronos+Qwen融合({kronos_qwen_ratio:.1f}:{q_ratio:.1f}): 带符号强度={step1_signed_strength:.4f}, 最终强度={step1_strength:.4f}, 方向值={step1_direction_value:.3f}")
         else:
-            # 方向不一致，减弱信号
-            sentiment_penalty = abs(sentiment_score) * sentiment_weight
-            fused_strength = tech_strength * (1 - sentiment_penalty)
+            step1_strength = abs(step1_signed_strength)
         
-        # 应用风险乘数
-        fused_strength *= risk_multiplier
+        # 第二步：第一步结果 + FinGPT（使用tech_fingpt_ratio）
+        # 第一步的带符号强度用于第二步融合
+        final_signed_strength = step1_signed_strength
+        final_direction_value = step1_direction_value
         
-        # 更新信号
-        fused_signal["trend_strength"] = fused_strength
-        fused_signal["original_tech_strength"] = tech_strength
-        fused_signal["sentiment_score"] = sentiment_score
-        fused_signal["risk_level"] = risk_level
-        fused_signal["direction_consistent"] = direction_consistent
-        fused_signal["fusion_method"] = "加权融合"
-        fused_signal["fusion_weights"] = {
-            "technical": technical_weight,
-            "sentiment": sentiment_weight,
-            "risk_multiplier": risk_multiplier
-        }
+        if sentiment_analysis:
+            sentiment_score = sentiment_analysis.get("sentiment_score", 0.0)
+            risk_level = sentiment_analysis.get("risk_level", "LOW")
+            
+            # 将FinGPT情绪转换为方向值
+            fingpt_direction_value = sentiment_score * 2 - 1  # 0-1 -> -1-1
+            # FinGPT的强度：情绪偏离0.5的程度 × 0.01（基准强度）
+            fingpt_strength = abs(sentiment_score - 0.5) * 2 * 0.01
+            # FinGPT的带符号强度
+            fingpt_signed_strength = fingpt_strength * fingpt_direction_value
+            
+            # 技术分析:FinGPT = tech_fingpt_ratio : (1-tech_fingpt_ratio) 融合（使用带符号强度）
+            f_ratio = 1 - tech_fingpt_ratio
+            final_signed_strength = (step1_signed_strength * tech_fingpt_ratio) + (fingpt_signed_strength * f_ratio)
+            final_direction_value = (step1_direction_value * tech_fingpt_ratio) + (fingpt_direction_value * f_ratio)
+            # 最终强度取绝对值
+            final_strength = abs(final_signed_strength)
+            
+            # 根据风险等级调整
+            risk_multiplier = {"LOW": 1.0, "MEDIUM": 0.8, "HIGH": 0.5}.get(risk_level, 1.0)
+            final_strength = final_strength * risk_multiplier
+            
+            print(f"    [FinGPT] 情绪: {sentiment_score:.3f}, 风险: {risk_level}, 方向值: {fingpt_direction_value:.3f}, 强度: {fingpt_strength:.4f}, 带符号强度: {fingpt_signed_strength:.4f}")
+            print(f"    [第二步] +FinGPT融合({tech_fingpt_ratio:.1f}:{f_ratio:.1f}): 带符号强度={final_signed_strength:.4f}, 最终强度={final_strength:.4f}, 方向值={final_direction_value:.3f}, 风险乘数={risk_multiplier}")
+        else:
+            final_strength = abs(final_signed_strength)
+        
+        # 确定最终方向
+        if final_direction_value > 0.1:
+            final_direction = "LONG"
+        elif final_direction_value < -0.1:
+            final_direction = "SHORT"
+        else:
+            final_direction = "NEUTRAL"
+        
+        # 不强制强度范围，保持融合后的真实值，但确保不小于0
+        final_strength = max(0.0, min(final_strength, 0.01))
+        
+        # ============================================
+        # 拐点增强逻辑：利用Qwen的拐点检测
+        # ============================================
+        has_turning_point = False
+        turning_point_boost = False
+        turning_point_boost_pct = 0.0
+        
+        if qwen_signal:
+            has_turning_point = qwen_signal.get("has_turning_point", False)
+            
+            if has_turning_point and final_direction != "NEUTRAL":
+                qwen_direction = qwen_signal.get("trend_direction", "NEUTRAL")
+                
+                # 检查Qwen方向是否与最终融合方向一致
+                direction_match = False
+                if (final_direction in ["LONG", "BUY"] and qwen_direction in ["LONG", "BUY"]) or \
+                   (final_direction in ["SHORT", "SELL"] and qwen_direction in ["SHORT", "SELL"]):
+                    direction_match = True
+                
+                if direction_match:
+                    # 方向一致时，增强信号强度30%
+                    original_strength = final_strength
+                    turning_point_boost_pct = 0.3
+                    final_strength = final_strength * (1 + turning_point_boost_pct)
+                    final_strength = min(final_strength, 0.01)  # 不超过最大强度
+                    turning_point_boost = True
+                    print(f"    [拐点增强] Qwen检测到拐点且方向一致，信号强度增强30%: {original_strength:.4f} → {final_strength:.4f}")
+        
+        # 更新融合信号
+        fused_signal["trend_strength"] = final_strength
+        fused_signal["trend_direction"] = final_direction
+        fused_signal["original_kronos_strength"] = kronos_strength
+        fused_signal["fusion_method"] = "两步融合" if qwen_signal else "单步融合"
         fused_signal["fusion_timestamp"] = datetime.now().isoformat()
+        fused_signal["has_turning_point"] = has_turning_point
+        fused_signal["turning_point_boost"] = turning_point_boost
+        fused_signal["turning_point_boost_pct"] = turning_point_boost_pct
         
-        # 保留原始Kronos的信号有效性，不重新评估
-        # 只添加融合信息，但不改变原始信号有效性
+        print(f"    [融合] 最终信号: {final_direction} (强度: {final_strength:.4f})")
         
         return fused_signal
     
@@ -528,11 +650,25 @@ class StrategyCoordinator:
                 print(f"    ✗ Kronos分析失败: {e}")
                 kronos_signal = None
         
+        # Qwen分析
+        qwen_signal = None
+        if self.use_qwen and self.qwen_available and self.qwen_analyzer and market_data is not None:
+            try:
+                print("  2. Qwen技术分析...")
+                qwen_signal = self.qwen_analyzer.get_enhanced_signal(market_data)
+                if qwen_signal:
+                    print(f"    - 方向: {qwen_signal.get('trend_direction', '未知')}")
+                    print(f"    - 强度: {qwen_signal.get('trend_strength', 0):.3f}")
+            except Exception as e:
+                print(f"    ✗ Qwen分析失败: {e}")
+                qwen_signal = None
+        
         # FinGPT舆情分析
         sentiment_analysis = None
         if self.fingpt_available and self.fingpt_analyzer:
             try:
-                print("  2. FinGPT舆情分析...")
+                step_num = 3 if qwen_signal else 2
+                print(f"  {step_num}. FinGPT舆情分析...")
                 sentiment_analysis = self.fingpt_analyzer.analyze_market_sentiment(self.symbol)
                 if sentiment_analysis:
                     print(f"    - 情绪: {sentiment_analysis.get('overall_sentiment', '未知')}")
@@ -542,47 +678,63 @@ class StrategyCoordinator:
                 sentiment_analysis = None
         
         # 信号整合与过滤
-        print("  3. 信号整合与过滤...")
-        final_decision = self._integrate_signals(kronos_signal, sentiment_analysis)
+        step_num = 4 if qwen_signal and sentiment_analysis else (3 if (qwen_signal or sentiment_analysis) else 2)
+        print(f"  {step_num}. 信号整合与过滤...")
+        final_decision = self._integrate_signals(kronos_signal, qwen_signal, sentiment_analysis)
         
         # 生成交易建议
-        print("  4. 生成交易建议...")
+        step_num += 1
+        print(f"  {step_num}. 生成交易建议...")
         trading_recommendation = self._generate_trading_recommendation(final_decision)
         
         # 转换为标准格式
         integration = final_decision
+        final_signal_data = integration.get('final_signal', {})
         
         return {
             'timestamp': datetime.now().isoformat(),
             'symbol': self.symbol,
             'kronos_signal': kronos_signal.get('trend_direction', 'NEUTRAL') if kronos_signal else 'NEUTRAL',
+            'qwen_signal': qwen_signal.get('trend_direction', 'NEUTRAL') if qwen_signal else 'NEUTRAL',
             'final_signal': trading_recommendation.get('action', 'HOLD'),
-            'signal_strength': kronos_signal.get('trend_strength', 0) if kronos_signal else 0,
+            'signal_strength': final_signal_data.get('trend_strength', 0) if final_signal_data else (kronos_signal.get('trend_strength', 0) if kronos_signal else 0),
             'recommendation': '; '.join(trading_recommendation.get('reasoning', [])) if trading_recommendation.get('reasoning') else '正常交易',
             'sentiment': sentiment_analysis,
             'filtered': integration.get('signal_filtered', False),
             'filter_reason': integration.get('filter_reason', ''),
+            'has_turning_point': final_signal_data.get('has_turning_point', False),
+            'turning_point_boost': final_signal_data.get('turning_point_boost', False),
+            'turning_point_boost_pct': final_signal_data.get('turning_point_boost_pct', 0.0),
             'analysis_summary': {
                 'kronos_available': kronos_signal is not None,
+                'qwen_available': qwen_signal is not None,
                 'fingpt_available': sentiment_analysis is not None
             }
         }
     
     def get_system_status(self) -> Dict:
         """获取系统状态信息"""
+        modules_status = {
+            "kronos": {
+                "available": self.kronos_available,
+                "model_name": self.kronos_analyzer.model_name if self.kronos_analyzer else None
+            },
+            "fingpt": {
+                "available": self.fingpt_available,
+                "use_local_model": self.fingpt_analyzer.use_local_model if self.fingpt_analyzer else False
+            }
+        }
+        
+        if hasattr(self, 'qwen_available'):
+            modules_status["qwen"] = {
+                "available": self.qwen_available,
+                "use_local_model": self.qwen_analyzer.use_local_model if hasattr(self, 'qwen_analyzer') and self.qwen_analyzer else False
+            }
+        
         return {
             "timestamp": datetime.now().isoformat(),
             "symbol": self.symbol,
-            "modules": {
-                "kronos": {
-                    "available": self.kronos_available,
-                    "model_name": self.kronos_analyzer.model_name if self.kronos_analyzer else None
-                },
-                "fingpt": {
-                    "available": self.fingpt_available,
-                    "use_local_model": self.fingpt_analyzer.use_local_model if self.fingpt_analyzer else False
-                }
-            },
+            "modules": modules_status,
             "config": self.config,
             "performance": self.performance_stats,
             "memory_usage": "待集成",  # 可添加内存使用监控

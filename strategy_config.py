@@ -59,7 +59,7 @@ class StrategyConfig:
 
     STRATEGY_CONFIG = {
         "entry_confirm_count": 2,
-        "reverse_confirm_count": 2,
+        "reverse_confirm_count": 1,
         "post_entry_hours": 4.0,
         "take_profit_min_pct": 0.25,
         "force_stop_loss_pct": -3.0,

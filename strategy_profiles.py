@@ -17,6 +17,8 @@ class StrategyProfiles:
         "coordinator": {
             "min_signal_strength": 0.0045,
             "max_position_size": 0.1,
+            "kronos_qwen_ratio": 0.7,
+            "tech_fingpt_ratio": 0.8,
             "sentiment_weight": 0.3,
             "technical_weight": 0.7,
             "black_swan_threshold": "HIGH",
@@ -93,6 +95,8 @@ class StrategyProfiles:
         "coordinator": {
             "min_signal_strength": 0.0025,
             "max_position_size": 0.12,
+            "kronos_qwen_ratio": 0.7,
+            "tech_fingpt_ratio": 0.8,
             "sentiment_weight": 0.4,
             "technical_weight": 0.6,
             "black_swan_threshold": "MEDIUM",
@@ -169,6 +173,8 @@ class StrategyProfiles:
         "coordinator": {
             "min_signal_strength": 0.0035,
             "max_position_size": 0.1,
+            "kronos_qwen_ratio": 0.7,
+            "tech_fingpt_ratio": 0.8,
             "sentiment_weight": 0.5,
             "technical_weight": 0.5,
             "black_swan_threshold": "MEDIUM",
@@ -244,6 +250,8 @@ class StrategyProfiles:
         "coordinator": {
             "min_signal_strength": 0.0030,
             "max_position_size": 0.1,
+            "kronos_qwen_ratio": 0.7,
+            "tech_fingpt_ratio": 0.8,
             "sentiment_weight": 0.3,
             "technical_weight": 0.7,
             "black_swan_threshold": "MEDIUM",
@@ -318,6 +326,8 @@ class StrategyProfiles:
         "coordinator": {
             "min_signal_strength": 0.0030,
             "max_position_size": 0.1,
+            "kronos_qwen_ratio": 0.7,
+            "tech_fingpt_ratio": 0.8,
             "sentiment_weight": 0.3,
             "technical_weight": 0.7,
             "black_swan_threshold": "MEDIUM",

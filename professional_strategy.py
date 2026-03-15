@@ -11,27 +11,13 @@ from strategy_profiles import StrategyProfiles
 from market_state_analyzer import MarketStateAnalyzer, TimeStrategyAnalyzer
 from binance.client import Client
 from typing import Dict
-from color_print import (
-    print_open, 
-    print_close, 
-    print_success, 
-    print_error, 
-    print_warning, 
-    print_info,
-    print_signal_buy,
-    print_signal_sell,
-    print_signal_neutral,
-    print_trend_up,
-    print_trend_down,
-    print_reverse_signal,
-    print_ai_decision,
-    print_highlight
-)
 
 # 多智能体系统组件将在初始化时动态导入
 MULTI_AGENT_AVAILABLE = False
 FinGPTSentimentAnalyzer = None
 StrategyCoordinator = None
+QwenAnalyzer = None
+get_qwen_analyzer = None
 
 
 class ProfessionalTradingStrategy:
@@ -69,7 +55,8 @@ class ProfessionalTradingStrategy:
                 load_dotenv()
         self.symbol = symbol or StrategyConfig.SYMBOL
         self.timeframe = timeframe or StrategyConfig.TIMEFRAME
-        self.leverage = leverage if leverage is not None else StrategyConfig.LEVERAGE
+        # 杠杆将完全使用策略配置的值，暂不初始化
+        self.leverage = StrategyConfig.LEVERAGE
         self.interval = (
             interval if interval is not None else StrategyConfig.CHECK_INTERVAL
         )
@@ -172,14 +159,10 @@ class ProfessionalTradingStrategy:
 
         self.strategy_profile = StrategyProfiles.get_profile(strategy_type)
         
-        # 从策略profile中读取杠杆参数
+        # 完全使用策略配置的杠杆值
         basic_config = self.strategy_profile.get("basic", {})
         if "LEVERAGE" in basic_config:
-            if leverage is None:
-                self.leverage = basic_config["LEVERAGE"]
-            elif leverage != basic_config["LEVERAGE"]:
-                self._log(f"[警告] 传入的杠杆({leverage})与策略配置的杠杆({basic_config['LEVERAGE']})不一致，使用策略配置")
-                self.leverage = basic_config["LEVERAGE"]
+            self.leverage = basic_config["LEVERAGE"]
         
         # 先从strategy_profile加载默认配置
         self._load_strategy_config()
@@ -262,6 +245,7 @@ class ProfessionalTradingStrategy:
 
         # 初始化多智能体系统
         self.fingpt_analyzer = None
+        self.qwen_analyzer = None
         self.strategy_coordinator = None
         self._initialize_multi_agent_system()
 
@@ -593,7 +577,7 @@ class ProfessionalTradingStrategy:
 
     def _initialize_multi_agent_system(self):
         """初始化多智能体量化交易系统"""
-        global MULTI_AGENT_AVAILABLE, FinGPTSentimentAnalyzer, StrategyCoordinator
+        global MULTI_AGENT_AVAILABLE, FinGPTSentimentAnalyzer, StrategyCoordinator, QwenAnalyzer, get_qwen_analyzer
         
         # 动态导入多智能体系统组件
         if FinGPTSentimentAnalyzer is None or StrategyCoordinator is None:
@@ -601,8 +585,12 @@ class ProfessionalTradingStrategy:
                 self._log("[多智能体系统] 正在导入模块...")
                 from fingpt_analyzer import FinGPTSentimentAnalyzer as FGSA
                 from strategy_coordinator import StrategyCoordinator as SC
+                from qwen_analyzer import QwenAnalyzer as QA
+                from qwen_analyzer import get_qwen_analyzer as GQA
                 FinGPTSentimentAnalyzer = FGSA
                 StrategyCoordinator = SC
+                QwenAnalyzer = QA
+                get_qwen_analyzer = GQA
                 MULTI_AGENT_AVAILABLE = True
                 self._log("[多智能体系统] 模块导入成功")
             except Exception as e:
@@ -623,15 +611,30 @@ class ProfessionalTradingStrategy:
                 use_local_model=True
             )
             self._log("  ✓ FinGPT舆情分析器初始化完成")
+            
+            # 初始化Qwen分析器
+            self._log("  正在初始化Qwen分析器...")
+            coin_symbol = self.symbol.replace("USDT", "")
+            self.qwen_analyzer = None
+            try:
+                self.qwen_analyzer = get_qwen_analyzer(
+                    symbol=coin_symbol,
+                    use_local_model=True
+                )
+                self._log("  ✓ Qwen分析器初始化完成")
+            except Exception as e:
+                self._log(f"  ✗ Qwen分析器初始化失败: {e}")
+                self.qwen_analyzer = None
 
             # 初始化策略协调器
             self._log("  正在初始化策略协调器...")
-            coin_symbol = self.symbol.replace("USDT", "")
             self.strategy_coordinator = StrategyCoordinator(
                 symbol=coin_symbol,
                 use_fingpt=True,
+                use_qwen=(self.qwen_analyzer is not None),
                 kronos_analyzer=self.analyzer,
-                fingpt_analyzer=self.fingpt_analyzer
+                fingpt_analyzer=self.fingpt_analyzer,
+                qwen_analyzer=self.qwen_analyzer
             )
             self._log("  ✓ 策略协调器初始化完成")
             
@@ -653,6 +656,7 @@ class ProfessionalTradingStrategy:
             import traceback
             self._log(traceback.format_exc())
             self.fingpt_analyzer = None
+            self.qwen_analyzer = None
             self.strategy_coordinator = None
 
     def _save_default_parameters(self):
@@ -1266,7 +1270,7 @@ class ProfessionalTradingStrategy:
         initial_size = position_size * initial_entry_ratio
 
         tp2_display = f"${tp2:.2f}" if tp2 is not None else "无"
-        print_open(f"开仓: {trend_direction}")
+        print(f"开仓: {trend_direction}")
         print(f"  入场价: ${current_price:.2f}")
         print(f"  止损: ${stop_loss:.2f}")
         print(f"  止盈1: ${tp1:.2f}, 止盈2: {tp2_display}")
@@ -1472,7 +1476,7 @@ class ProfessionalTradingStrategy:
             self.current_position = None
             return False
 
-        print_close(f"平仓: {self.current_position}, 原因: {reason}")
+        print(f"平仓: {self.current_position}, 原因: {reason}")
 
         self.binance.cancel_all_orders(self.symbol)
         self.binance.cancel_all_algo_orders(self.symbol)
@@ -1857,22 +1861,7 @@ class ProfessionalTradingStrategy:
         print(f"\n[持仓保护] 当前持仓: {self.current_position}, 价格: ${current_price:.2f}")
 
         # ============================================
-        # 保护机制1：反向信号强制平仓
-        # ============================================
-        if latest_signal:
-            signal_direction = latest_signal.get("trend_direction", "")
-            signal_strength = latest_signal.get("trend_strength", 0)
-            
-            if (self.current_position == "LONG" and signal_direction in ["SHORT", "SELL"]) or \
-               (self.current_position == "SHORT" and signal_direction in ["LONG", "BUY"]):
-                
-                if signal_strength >= self.threshold * 0.8:
-                    print(f"  [反向信号平仓] 当前: {self.current_position}, 新信号: {signal_direction}, 强度: {signal_strength:.4f}")
-                    self.close_position("Kronos反向信号平仓")
-                    return
-
-        # ============================================
-        # 保护机制2：基于ATR的动态止损 + 移动止损
+        # 保护机制1：基于ATR的动态止损 + 移动止损
         # ============================================
         # 移动止损功能已暂时禁用
         # if df is not None and len(df) >= 20:
@@ -2175,18 +2164,21 @@ class ProfessionalTradingStrategy:
                 print("="*60)
                 
                 try:
-                    coordinator_signal = self.strategy_coordinator.get_combined_signal(kronos_signal=signal)
+                    coordinator_signal = self.strategy_coordinator.get_combined_signal(market_data=df, kronos_signal=signal)
                     
                     if coordinator_signal:
                         print(f"\n[FinGPT] 市场情绪分析:")
-                        sentiment = coordinator_signal.get('sentiment', {})
-                        print(f"  市场情绪: {sentiment.get('overall_sentiment', 'UNKNOWN')}")
-                        print(f"  置信度: {sentiment.get('confidence', 0):.1%}")
-                        print(f"  风险等级: {sentiment.get('risk_level', 'UNKNOWN')}")
-                        
-                        risk_factors = sentiment.get('risk_factors', [])
-                        if risk_factors:
-                            print(f"  风险因素: {', '.join(risk_factors[:3])}")
+                        sentiment = coordinator_signal.get('sentiment')
+                        if sentiment:
+                            print(f"  市场情绪: {sentiment.get('overall_sentiment', 'UNKNOWN')}")
+                            print(f"  置信度: {sentiment.get('confidence', 0):.1%}")
+                            print(f"  风险等级: {sentiment.get('risk_level', 'UNKNOWN')}")
+                            
+                            risk_factors = sentiment.get('risk_factors', [])
+                            if risk_factors:
+                                print(f"  风险因素: {', '.join(risk_factors[:3])}")
+                        else:
+                            print(f"  市场情绪: 无数据")
                         
                         print(f"\n[策略协调器] 信号过滤结果:")
                         print(f"  Kronos原始信号: {coordinator_signal.get('kronos_signal', 'UNKNOWN')}")
@@ -2196,41 +2188,41 @@ class ProfessionalTradingStrategy:
                         
                         # 根据信号类型使用不同颜色显示
                         if final_signal in ['BUY', 'LONG']:
-                            print_signal_buy(f"  过滤后信号: {final_signal}")
+                            print(f"  过滤后信号: {final_signal}")
                         elif final_signal in ['SELL', 'SHORT']:
-                            print_signal_sell(f"  过滤后信号: {final_signal}")
+                            print(f"  过滤后信号: {final_signal}")
                         else:
-                            print_signal_neutral(f"  过滤后信号: {final_signal}")
+                            print(f"  过滤后信号: {final_signal}")
                         
                         print(f"  信号强度: {final_strength:.3f}")
                         print(f"  执行建议: {coordinator_signal.get('recommendation', 'UNKNOWN')}")
                         
                         if coordinator_signal.get('filtered', False):
-                            print_warning(f"  ⚠️ 信号被过滤原因: {coordinator_signal.get('filter_reason', '未知')}")
+                            print(f"  ⚠️ 信号被过滤原因: {coordinator_signal.get('filter_reason', '未知')}")
                         
                         is_filtered = coordinator_signal.get('filtered', False)
                         
                         if is_filtered:
-                            print_warning(f"\n[策略协调器] 信号被过滤，建议观望，不执行交易")
+                            print(f"\n[策略协调器] 信号被过滤，建议观望，不执行交易")
                             print("="*60 + "\n")
                             print(f"当前盈亏: {position_pnl_pct:.2f}%")
-                            print_ai_decision(f"AI决策: 信号被过滤，持仓观望")
+                            print(f"AI决策: 信号被过滤，持仓观望")
                             self.check_position_status(df=df, latest_signal=signal)
                             total_time = time.time() - start_time
                             print(f"*******总执行耗时: {total_time:.2f}秒*******")
                             return
                         elif final_signal in ['BUY', 'SELL', 'LONG', 'SHORT']:
                             if final_signal in ['BUY', 'LONG']:
-                                print_highlight(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
+                                print(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
                             else:
-                                print_highlight(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
+                                print(f"\n[策略协调器] 采用综合信号: {final_signal} (强度: {final_strength:.3f})")
                             signal['trend_direction'] = final_signal
                             signal['trend_strength'] = final_strength
                         else:
-                            print_info(f"\n[策略协调器] 建议观望，不执行交易")
+                            print(f"\n[策略协调器] 建议观望，不执行交易")
                             print("="*60 + "\n")
                             print(f"当前盈亏: {position_pnl_pct:.2f}%")
-                            print_ai_decision(f"AI决策: 观望")
+                            print(f"AI决策: 观望")
                             self.check_position_status(df=df, latest_signal=signal)
                             total_time = time.time() - start_time
                             print(f"*******总执行耗时: {total_time:.2f}秒*******")
@@ -2246,23 +2238,20 @@ class ProfessionalTradingStrategy:
 
             print(f"当前盈亏: {position_pnl_pct:.2f}%")
 
-            # AI决策
+            # AI决策 - 基于策略协调器的最终信号
             should_close = False
             should_add = False
             close_reason = ""
 
-            # 1. 检查是否有强烈拐点（has_turning_point）或强烈信号
+            # 1. 检查是否有强烈信号（基于策略协调器的最终信号）
             has_strong_signal = False
-            has_turning_point = signal.get("has_turning_point", False)
             signal_strength = signal.get("trend_strength", 0)
             
-            # 判断强烈信号条件：
-            # - 有拐点检测 → 强烈信号
-            # - 信号强度 > 阈值的1.5倍 → 强烈信号
-            if has_turning_point or signal_strength > self.threshold * 1.5:
+            # 判断强烈信号条件：信号强度 > 阈值的1.5倍 → 强烈信号
+            if signal_strength > self.threshold * 1.5:
                 has_strong_signal = True
 
-            # 2. 开仓后计时逻辑（新功能）
+            # 2. 开仓后计时逻辑
             if self.post_entry_time:
                 hours_since_entry = (self._get_current_time() - self.post_entry_time).total_seconds() / 3600
                 print(f"[开仓后计时] 已持仓 {hours_since_entry:.1f} 小时 (阈值: {self.post_entry_hours} 小时)")
@@ -2283,7 +2272,7 @@ class ProfessionalTradingStrategy:
                         # 连续2次同向信号 → 加仓
                         if self.post_entry_entry_count >= 2:
                             should_add = True
-                            print_highlight(f"  ✅ 连续2次同向信号，准备加仓")
+                            print(f"  ✅ 连续2次同向信号，准备加仓")
                     else:
                         # 非同向信号：重置计数
                         self.post_entry_entry_count = 0
@@ -2292,75 +2281,57 @@ class ProfessionalTradingStrategy:
                     if position_pnl_pct >= self.take_profit_min_pct:
                         should_close = True
                         close_reason = f"超过{self.post_entry_hours}小时且盈利{position_pnl_pct:.2f}% > {self.take_profit_min_pct}%"
-                        print_highlight(f"  ✅ 超过{self.post_entry_hours}小时且盈利达标，执行止盈平仓")
+                        print(f"  ✅ 超过{self.post_entry_hours}小时且盈利达标，执行止盈平仓")
 
-            # 3. 反向信号检测和确认逻辑（强趋势和普通趋势共用一个计数器）
+            # 3. 反向信号检测和确认逻辑（基于策略协调器的最终信号）
             if not should_close and self.current_position == "LONG" and signal["trend_direction"] == "SHORT":
                 if "short" == self.last_reverse_signal:
                     self.consecutive_reverse_count += 1
                     if has_strong_signal:
-                        if has_turning_point:
-                            print_reverse_signal(f"  ⚡ 检测到强烈拐点做空信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
-                        else:
-                            print_reverse_signal(f"  ⚡ 检测到强做空信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        print(f"  ⚡ 检测到强做空信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
                     else:
-                        print_warning(f"  检测到正常做空信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        print(f"  检测到正常做空信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
                     
                     if self.consecutive_reverse_count >= self.reverse_confirm_count:
                         should_close = True
                         if has_strong_signal:
-                            if has_turning_point:
-                                close_reason = "强烈拐点检测做空（连续确认）"
-                            else:
-                                close_reason = "强趋势反转做空（连续确认）"
+                            close_reason = "强趋势反转做空（连续确认）"
                         else:
                             close_reason = "趋势反转做空（连续确认）"
-                        print_highlight(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
+                        print(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
                 else:
                     # 新的信号，重置计数器
                     self.consecutive_reverse_count = 1
                     self.last_reverse_signal = "short"
                     if has_strong_signal:
-                        if has_turning_point:
-                            print_reverse_signal(f"  ⚡ 检测到新强烈拐点做空信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
-                        else:
-                            print_reverse_signal(f"  ⚡ 检测到新强做空信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                        print(f"  ⚡ 检测到新强做空信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
                     else:
-                        print_warning(f"  检测到新正常做空信号，连续第1/{self.reverse_confirm_count}次确认")
+                        print(f"  检测到新正常做空信号，连续第1/{self.reverse_confirm_count}次确认")
             elif not should_close and (
                 self.current_position == "SHORT" and signal["trend_direction"] == "LONG"
             ):
                 if "long" == self.last_reverse_signal:
                     self.consecutive_reverse_count += 1
                     if has_strong_signal:
-                        if has_turning_point:
-                            print_reverse_signal(f"  ⚡ 检测到强烈拐点做多信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
-                        else:
-                            print_reverse_signal(f"  ⚡ 检测到强做多信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        print(f"  ⚡ 检测到强做多信号（强度: {signal_strength:.4f}），连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
                     else:
-                        print_warning(f"  检测到正常做多信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
+                        print(f"  检测到正常做多信号，连续第{self.consecutive_reverse_count}/{self.reverse_confirm_count}次确认")
                     
                     if self.consecutive_reverse_count >= self.reverse_confirm_count:
                         should_close = True
                         if has_strong_signal:
-                            if has_turning_point:
-                                close_reason = "强烈拐点检测做多（连续确认）"
-                            else:
-                                close_reason = "强趋势反转做多（连续确认）"
+                            close_reason = "强趋势反转做多（连续确认）"
                         else:
                             close_reason = "趋势反转做多（连续确认）"
-                        print_highlight(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
+                        print(f"  ✅ 确认{self.reverse_confirm_count}次，执行平仓")
                 else:
                     # 新的信号，重置计数器
                     self.consecutive_reverse_count = 1
                     self.last_reverse_signal = "long"
                     if has_strong_signal:
-                        if has_turning_point:
-                            print_reverse_signal(f"  ⚡ 检测到新强烈拐点做多信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
-                        else:
-                            print_reverse_signal(f"  ⚡ 检测到新强做多信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
+                        print(f"  ⚡ 检测到新强做多信号（强度: {signal_strength:.4f}），连续第1/{self.reverse_confirm_count}次确认")
                     else:
-                        print_warning(f"  检测到新正常做多信号，连续第1/{self.reverse_confirm_count}次确认")
+                        print(f"  检测到新正常做多信号，连续第1/{self.reverse_confirm_count}次确认")
             else:
                 # 趋势未反转，但保留计数器，避免频繁重置
                 pass
@@ -2386,10 +2357,10 @@ class ProfessionalTradingStrategy:
                     should_add = True
 
             if should_close:
-                print_ai_decision(f"AI决策: 平仓 - {close_reason}")
+                print(f"AI决策: 平仓 - {close_reason}")
                 self.close_position(close_reason)
             elif should_add:
-                print_ai_decision(f"AI决策: 加仓 - 盈利{position_pnl_pct:.2f}%且趋势有利")
+                print(f"AI决策: 加仓 - 盈利{position_pnl_pct:.2f}%且趋势有利")
                 self.add_position()
             else:
                 print(f"AI决策: 持仓观望")
@@ -2475,20 +2446,23 @@ class ProfessionalTradingStrategy:
             
             try:
                 # 获取策略协调器的综合信号（传递已计算的Kronos信号，避免循环调用）
-                coordinator_signal = self.strategy_coordinator.get_combined_signal(kronos_signal=signal)
+                coordinator_signal = self.strategy_coordinator.get_combined_signal(market_data=df, kronos_signal=signal)
                 
                 if coordinator_signal:
                     # 显示FinGPT分析结果
                     print(f"\n[FinGPT] 市场情绪分析:")
-                    sentiment = coordinator_signal.get('sentiment', {})
-                    print(f"  市场情绪: {sentiment.get('overall_sentiment', 'UNKNOWN')}")
-                    print(f"  置信度: {sentiment.get('confidence', 0):.1%}")
-                    print(f"  风险等级: {sentiment.get('risk_level', 'UNKNOWN')}")
-                    
-                    # 显示风险因素
-                    risk_factors = sentiment.get('risk_factors', [])
-                    if risk_factors:
-                        print(f"  风险因素: {', '.join(risk_factors[:3])}")
+                    sentiment = coordinator_signal.get('sentiment')
+                    if sentiment:
+                        print(f"  市场情绪: {sentiment.get('overall_sentiment', 'UNKNOWN')}")
+                        print(f"  置信度: {sentiment.get('confidence', 0):.1%}")
+                        print(f"  风险等级: {sentiment.get('risk_level', 'UNKNOWN')}")
+                        
+                        # 显示风险因素
+                        risk_factors = sentiment.get('risk_factors', [])
+                        if risk_factors:
+                            print(f"  风险因素: {', '.join(risk_factors[:3])}")
+                    else:
+                        print(f"  市场情绪: 无数据")
                     
                     # 显示策略协调器决策
                     print(f"\n[策略协调器] 信号过滤结果:")
@@ -2531,14 +2505,14 @@ class ProfessionalTradingStrategy:
 
         # 如果不能开仓，分析完市场后就结束
         if not can_open_position:
-            print_ai_decision(f"AI决策: 无法开仓 - {getattr(self, 'last_risk_msg', '风控限制')}")
+            print(f"AI决策: 无法开仓 - {getattr(self, 'last_risk_msg', '风控限制')}")
             total_time = time.time() - start_time
             print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
         # 如果信号已经被策略协调器过滤，直接跳过
         if not signal.get("signal_valid", True):
-            print_ai_decision("AI决策: 信号被策略协调器过滤，观望")
+            print(f"AI决策: 信号被策略协调器过滤，观望")
             # 重置开仓确认计数器
             self.consecutive_entry_count = 0
             self.last_entry_signal = None
@@ -2549,7 +2523,7 @@ class ProfessionalTradingStrategy:
         # 自动/时间策略切换
         effective_strategy = self._determine_effective_strategy(df, signal)
         if effective_strategy != self.current_effective_strategy:
-            print_highlight(
+            print(
                 f"[策略切换] {self.current_effective_strategy} -> {effective_strategy}"
             )
             self.current_effective_strategy = effective_strategy
@@ -2578,19 +2552,19 @@ class ProfessionalTradingStrategy:
                 )
 
         if not signal["signal_valid"]:
-            print_ai_decision("AI决策: 信号无效，观望")
+            print(f"AI决策: 信号无效，观望")
             total_time = time.time() - start_time
             print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
         entry_ok, entry_msg = self.check_entry_conditions(signal, df, funding_rate)
         if not entry_ok:
-            print_ai_decision(f"AI决策: 入场条件不满足 - {entry_msg}")
+            print(f"AI决策: 入场条件不满足 - {entry_msg}")
             total_time = time.time() - start_time
             print(f"*******总执行耗时: {total_time:.2f}秒*******")
             return
 
-        print_success(f"入场条件满足: {entry_msg}")
+        print(f"入场条件满足: {entry_msg}")
 
         # 1. 检查是否有强烈拐点或强烈信号
         has_strong_signal = False
@@ -2643,9 +2617,9 @@ class ProfessionalTradingStrategy:
         
         # 显示最终AI决策
         if self.consecutive_entry_count >= self.entry_confirm_count:
-            print_ai_decision(f"AI决策: 开仓（{current_entry_signal}）")
+            print(f"AI决策: 开仓（{current_entry_signal}）")
         else:
-            print_ai_decision(f"AI决策: 等待确认（{self.consecutive_entry_count}/{self.entry_confirm_count}次）")
+            print(f"AI决策: 等待确认（{self.consecutive_entry_count}/{self.entry_confirm_count}次）")
 
         total_time = time.time() - start_time
         print(f"*******总执行耗时: {total_time:.2f}秒*******")

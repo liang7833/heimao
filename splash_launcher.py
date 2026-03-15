@@ -97,7 +97,7 @@ class SplashScreen:
                    fg="#ffffff", font=("Arial", 150)).pack(pady=(100, 20))
         
         # 显示文字
-        text_label = tk.Label(main_frame, text="黑猫交易系统v2.2", 
+        text_label = tk.Label(main_frame, text="黑猫交易系统v3.0", 
                             bg="#1a1a1a", fg="#ffffff", 
                             font=("微软雅黑", 28, "bold"))
         text_label.pack()
